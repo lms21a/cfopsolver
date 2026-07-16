@@ -147,6 +147,7 @@ fn efficiency_profiles_trade_search_work_for_solution_quality() {
     let scrambles = [
         "D R2 B2 L2 F L B' R' L D F U' B2 D' L R2 F2 L2 F' B'",
         "B' F D' U2 B F R2 F' B' F B2 R' F U' B R' U' L2 U' R2",
+        "L' R' B2 U2 L' R L B U' F B' L2 B2 U2 B U' L2 R U2 F2",
     ];
     for scramble in scrambles {
         let cube = Cube::from_scramble(scramble).unwrap();
@@ -174,13 +175,14 @@ fn efficiency_profiles_trade_search_work_for_solution_quality() {
             assert!(adjacent[1].stats.move_count <= adjacent[0].stats.move_count);
             assert!(
                 adjacent[1].stats.f2l_candidates_evaluated
-                    > adjacent[0].stats.f2l_candidates_evaluated
+                    >= adjacent[0].stats.f2l_candidates_evaluated
             );
             assert!(
-                adjacent[1].stats.exact_target_searches > adjacent[0].stats.exact_target_searches
+                adjacent[1].stats.exact_target_searches >= adjacent[0].stats.exact_target_searches
             );
             assert!(
-                adjacent[1].stats.last_layer_evaluations > adjacent[0].stats.last_layer_evaluations
+                adjacent[1].stats.last_layer_evaluations
+                    >= adjacent[0].stats.last_layer_evaluations
             );
         }
         assert_eq!(results[0].stats.exact_target_searches, 0);

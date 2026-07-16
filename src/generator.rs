@@ -6,7 +6,7 @@ use std::{
 
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha12Rng;
-use rayon::{prelude::*, ThreadPoolBuilder};
+use rayon::{prelude::*, ThreadPool, ThreadPoolBuilder};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -123,25 +123,8 @@ pub struct GeneratedSample {
 
 pub fn generate_dataset(config: &GenerateConfig) -> Result<Vec<GeneratedSample>> {
     validate_config(config)?;
-    let pool = if config.threads == 0 {
-        ThreadPoolBuilder::new()
-    } else {
-        ThreadPoolBuilder::new().num_threads(config.threads)
-    }
-    .build()
-    .map_err(|error| Error::Solver(format!("could not build generation thread pool: {error}")))?;
-
-    let records: Vec<Result<GeneratedSample>> = pool.install(|| {
-        (0..config.count)
-            .into_par_iter()
-            .map(|index| {
-                generate_one(config, index).map_err(|error| {
-                    Error::Solver(format!("generation record {index} failed: {error}"))
-                })
-            })
-            .collect()
-    });
-    records.into_iter().collect()
+    let pool = generation_pool(config.threads)?;
+    generate_range_in_pool(config, 0, &pool)
 }
 
 /// Generate in bounded batches and stream JSONL without retaining the full dataset.
@@ -155,12 +138,13 @@ pub fn generate_to_jsonl(
         return Err(Error::Solver("batch_size must be at least one".into()));
     }
     let mut writer = BufWriter::new(File::create(path)?);
+    let pool = generation_pool(config.threads)?;
     let mut offset = 0;
     while offset < config.count {
         let size = batch_size.min(config.count - offset);
         let mut batch_config = config.clone();
         batch_config.count = size;
-        let records = generate_range(&batch_config, offset)?;
+        let records = generate_range_in_pool(&batch_config, offset, &pool)?;
         for record in records {
             serde_json::to_writer(&mut writer, &record)?;
             writer.write_all(b"\n")?;
@@ -181,14 +165,21 @@ pub fn write_jsonl(records: &[GeneratedSample], path: impl AsRef<Path>) -> Resul
     Ok(())
 }
 
-fn generate_range(config: &GenerateConfig, start_index: usize) -> Result<Vec<GeneratedSample>> {
-    let pool = if config.threads == 0 {
+fn generation_pool(threads: usize) -> Result<ThreadPool> {
+    if threads == 0 {
         ThreadPoolBuilder::new()
     } else {
-        ThreadPoolBuilder::new().num_threads(config.threads)
+        ThreadPoolBuilder::new().num_threads(threads)
     }
     .build()
-    .map_err(|error| Error::Solver(format!("could not build generation thread pool: {error}")))?;
+    .map_err(|error| Error::Solver(format!("could not build generation thread pool: {error}")))
+}
+
+fn generate_range_in_pool(
+    config: &GenerateConfig,
+    start_index: usize,
+    pool: &ThreadPool,
+) -> Result<Vec<GeneratedSample>> {
     let records: Vec<Result<GeneratedSample>> = pool.install(|| {
         (start_index..start_index + config.count)
             .into_par_iter()

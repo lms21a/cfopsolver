@@ -170,9 +170,9 @@ verified endpoint. Dataset records using this expanded structure declare
 
 Solve results expose `stats.f2l_candidates_evaluated`,
 `stats.exact_target_searches`, and `stats.last_layer_evaluations`, making the cost of
-an efficiency profile visible instead of encoding it only in elapsed time. Generated
-primary solutions retain these counters with wall-clock timing zeroed for deterministic
-output.
+an efficiency profile visible instead of encoding it only in elapsed time. These are
+unique physical evaluations after per-solve cache hits. Generated primary solutions
+retain the counters with wall-clock timing zeroed for deterministic output.
 
 ## Bulk generation
 
@@ -245,20 +245,21 @@ cfop generate --count 1000 --output data.jsonl --method cfop \
 
 ## Performance snapshot
 
-On the development machine, a fixed batch of 500 hard, 20-move scrambles using CFOP,
-XXX-cross, lookahead F2L, four generation threads, and no trace produced:
+On the development machine, three release runs over the same 1,000 hard, 20-move
+scrambles (`seed=918273`) using CFOP, XXX-cross, lookahead F2L, four generation
+threads, batches of 128, and no trace produced:
 
-| Efficiency | Mean solution | Time | Throughput |
-|---|---:|---:|---:|
-| `fast` | 64.06 moves | 0.39 s | ~1,280 records/s |
-| `balanced` | 50.80 moves | 1.31 s | ~382 records/s |
-| `thorough` | 48.86 moves | 3.33 s | ~150 records/s |
-| `max` | 48.19 moves | 6.24 s | ~80 records/s |
+| Efficiency | Mean solution | v0.3.0 | v0.3.1 median | Throughput | Speedup |
+|---|---:|---:|---:|---:|---:|
+| `fast` | 64.17 moves | 0.77 s | 0.72 s | ~1,390 records/s | 1.07x |
+| `balanced` | 50.62 moves | 2.47 s | 1.90 s | ~526 records/s | 1.30x |
+| `thorough` | 48.72 moves | 6.16 s | 2.27 s | ~441 records/s | 2.71x |
+| `max` | 47.99 moves | 11.85 s | 2.45 s | ~408 records/s | 4.84x |
 
-Across those identical scrambles, no higher profile returned a longer solution than
-the preceding profile. Search effort rose from 3.95 to 19.78 to 53.24 to 111.41 mean
-F2L candidate evaluations. Treat these as a local snapshot; hardware, selected cross
-mode, trace output, and probe limits materially affect throughput.
+All 4,000 profile results verified, every higher profile was non-regressing on every
+scramble, and each profile's JSONL output was byte-identical across the three runs.
+Treat these as a local snapshot; hardware, selected cross mode, trace output, and
+probe limits materially affect throughput.
 
 ## Development
 
@@ -278,3 +279,5 @@ cargo check --features python
 `uv.lock` controls Python build and development dependencies; `Cargo.lock` controls
 Rust dependencies. The checkout currently targets Rust 1.70, publishes an abi3 wheel
 for Python 3.8+, and uses Python 3.12 for local development via `.python-version`.
+The pinned `rcuber` source is vendored for one pair-boundary performance extension;
+see `vendor/rcuber/PATCHES.md`.

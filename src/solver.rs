@@ -1,5 +1,6 @@
 use std::{
-    collections::HashSet,
+    cell::RefCell,
+    collections::{HashMap, HashSet},
     fmt,
     panic::{catch_unwind, AssertUnwindSafe},
     str::FromStr,
@@ -587,6 +588,7 @@ impl Solver {
         let cross_algorithm = pair_plan.cross_algorithm;
         let cross_optimized = pair_plan.cross_optimized;
         let remaining_pair_steps = pair_plan.remaining_steps;
+        let last_layer = pair_plan.last_layer;
         let cross_pairs = f2l_pairs(f2l_pair_mask(&advanced_end));
         let cross_stage = self.config.cross_mode.stage();
         if !stage_is_solved(cross_stage, &advanced_end) {
@@ -665,28 +667,43 @@ impl Solver {
             ));
         }
 
-        for stage in [Stage::Oll, Stage::Pll] {
-            let stage_started = Instant::now();
-            let (next, algorithm, repaired) = run_cfop_stage(stage, cube)?;
-            let message = decision_message(stage, &algorithm);
-            record_phase(
-                &self.config,
-                &mut stages,
-                &mut trace,
-                &mut exploration,
-                stage,
-                cube,
-                next,
-                algorithm.clone(),
-                Vec::new(),
-                micros(stage_started.elapsed().as_micros()),
-                repaired,
-                false,
-                message,
-            )?;
-            complete.extend(algorithm.moves().iter().copied());
-            cube = next;
-        }
+        let message = decision_message(Stage::Oll, &last_layer.oll);
+        record_phase(
+            &self.config,
+            &mut stages,
+            &mut trace,
+            &mut exploration,
+            Stage::Oll,
+            cube,
+            last_layer.after_oll,
+            last_layer.oll.clone(),
+            Vec::new(),
+            last_layer.oll_elapsed_micros,
+            last_layer.oll_repaired,
+            false,
+            message,
+        )?;
+        complete.extend(last_layer.oll.moves().iter().copied());
+        cube = last_layer.after_oll;
+
+        let message = decision_message(Stage::Pll, &last_layer.pll);
+        record_phase(
+            &self.config,
+            &mut stages,
+            &mut trace,
+            &mut exploration,
+            Stage::Pll,
+            cube,
+            last_layer.solved,
+            last_layer.pll.clone(),
+            Vec::new(),
+            last_layer.pll_elapsed_micros,
+            last_layer.pll_repaired,
+            false,
+            message,
+        )?;
+        complete.extend(last_layer.pll.moves().iter().copied());
+        cube = last_layer.solved;
 
         if !cube.is_solved() {
             return Err(Error::Solver(
@@ -797,20 +814,63 @@ struct F2lStep {
     optimized: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct F2lCandidate {
     end: Cube,
+    end_mask: u8,
     algorithm: Algorithm,
     pairs: Vec<F2lPair>,
     estimated_total: usize,
     repaired: bool,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct SearchMetrics {
     f2l_candidates_evaluated: usize,
     exact_target_searches: usize,
     last_layer_evaluations: usize,
+    f2l_cache: HashMap<(CubeKey, u8, bool), Option<F2lCandidate>>,
+    exact_cache: HashMap<ExactSearchKey, Option<Algorithm>>,
+    last_layer_cache: HashMap<CubeKey, LastLayerPlan>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct CubeKey([u8; 46]);
+
+impl From<Cube> for CubeKey {
+    fn from(cube: Cube) -> Self {
+        let mut key = [0; 46];
+        let mut index = 0;
+        for center in cube.inner.center {
+            key[index] = center as u8;
+            index += 1;
+        }
+        for corner in cube.inner.cp {
+            key[index] = corner as u8;
+            index += 1;
+        }
+        for orientation in cube.inner.co {
+            key[index] = orientation;
+            index += 1;
+        }
+        for edge in cube.inner.ep {
+            key[index] = edge as u8;
+            index += 1;
+        }
+        for orientation in cube.inner.eo {
+            key[index] = orientation;
+            index += 1;
+        }
+        Self(key)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ExactSearchKey {
+    from: CubeKey,
+    goal: CubeKey,
+    max_depth: usize,
+    probe_limit: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -819,13 +879,13 @@ struct F2lPlanNode {
     steps: Vec<F2lStep>,
     move_count: usize,
     priority: usize,
-    last_layer: Algorithm,
+    last_layer: Option<LastLayerPlan>,
 }
 
 #[derive(Debug)]
 struct F2lPlan {
     steps: Vec<F2lStep>,
-    last_layer: Algorithm,
+    last_layer: LastLayerPlan,
 }
 
 #[derive(Debug)]
@@ -834,17 +894,96 @@ struct F2lRoute {
     cross_algorithm: Algorithm,
     cross_optimized: bool,
     remaining_steps: Vec<F2lStep>,
-    last_layer: Algorithm,
+    last_layer: LastLayerPlan,
+    move_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct LastLayerPlan {
+    after_oll: Cube,
+    oll: Algorithm,
+    oll_elapsed_micros: u64,
+    oll_repaired: bool,
+    solved: Cube,
+    pll: Algorithm,
+    pll_elapsed_micros: u64,
+    pll_repaired: bool,
+    combined: Algorithm,
+}
+
+struct LastLayerEvaluator {
+    oll: OLLSolver,
+    pll: PLLSolver<'static>,
+}
+
+impl Default for LastLayerEvaluator {
+    fn default() -> Self {
+        let solved = rcuber::cubie::SOLVED_CUBIE_CUBE;
+        Self {
+            oll: OLLSolver::new(solved),
+            pll: PLLSolver::new(solved),
+        }
+    }
+}
+
+impl LastLayerEvaluator {
+    fn evaluate(&mut self, cube: Cube) -> Result<LastLayerPlan> {
+        let oll_started = Instant::now();
+        let (oll_engine_end, oll) = catch_unwind(AssertUnwindSafe(|| {
+            self.oll.cube = cube.inner;
+            let moves = self.oll.solve();
+            (
+                Cube {
+                    inner: self.oll.cube,
+                },
+                Algorithm::from_engines(moves),
+            )
+        }))
+        .map_err(|_| Error::Solver("oll engine panicked".into()))?;
+        let (after_oll, oll, oll_repaired) =
+            reconcile_stage_transition(Stage::Oll, cube, oll_engine_end, oll)?;
+        let oll_elapsed_micros = micros(oll_started.elapsed().as_micros());
+
+        let pll_started = Instant::now();
+        let (pll_engine_end, pll) = catch_unwind(AssertUnwindSafe(|| {
+            self.pll.cube = after_oll.inner;
+            let moves = self.pll.solve();
+            (
+                Cube {
+                    inner: self.pll.cube,
+                },
+                Algorithm::from_engines(moves),
+            )
+        }))
+        .map_err(|_| Error::Solver("pll engine panicked".into()))?;
+        let (solved, pll, pll_repaired) =
+            reconcile_stage_transition(Stage::Pll, after_oll, pll_engine_end, pll)?;
+        let pll_elapsed_micros = micros(pll_started.elapsed().as_micros());
+
+        let mut moves = oll.moves().to_vec();
+        moves.extend(pll.moves().iter().copied());
+        Ok(LastLayerPlan {
+            after_oll,
+            oll,
+            oll_elapsed_micros,
+            oll_repaired,
+            solved,
+            pll,
+            pll_elapsed_micros,
+            pll_repaired,
+            combined: Algorithm::new(moves).simplified(),
+        })
+    }
+}
+
+thread_local! {
+    static LAST_LAYER_EVALUATOR: RefCell<LastLayerEvaluator> =
+        RefCell::new(LastLayerEvaluator::default());
 }
 
 impl F2lRoute {
     fn move_count(&self) -> usize {
-        let mut moves = self.cross_algorithm.moves().to_vec();
-        for step in &self.remaining_steps {
-            moves.extend(step.algorithm.moves().iter().copied());
-        }
-        moves.extend(self.last_layer.moves().iter().copied());
-        Algorithm::new(moves).simplified().len()
+        self.move_count
     }
 }
 
@@ -980,24 +1119,28 @@ fn plan_f2l_pairs_until(
     metrics: &mut SearchMetrics,
 ) -> Result<F2lRoute> {
     let started = Instant::now();
-    let mut variants = vec![(false, 1usize)];
-    if strategy == F2lStrategy::Lookahead && efficiency != Efficiency::Fast {
-        variants.push((true, 1));
-        if matches!(efficiency, Efficiency::Thorough | Efficiency::Max) {
-            variants.push((true, 4));
-        }
-        if efficiency == Efficiency::Max {
-            variants.push((true, 64));
+    let mut variants = vec![(false, 1usize, true)];
+    if efficiency != Efficiency::Fast {
+        variants.push((false, 1, false));
+        if strategy == F2lStrategy::Lookahead {
+            variants.push((true, 1, false));
+            if matches!(efficiency, Efficiency::Thorough | Efficiency::Max) {
+                variants.push((true, 4, false));
+            }
+            if efficiency == Efficiency::Max {
+                variants.push((true, 64, false));
+            }
         }
     }
 
     let mut plans = Vec::with_capacity(variants.len());
     let mut first_error = None;
-    for (all_aufs, beam_width) in variants {
+    for (all_aufs, beam_width, single_pair_only) in variants {
         match beam_f2l_plan(
             cube,
             strategy,
             all_aufs,
+            single_pair_only,
             beam_width,
             target_pair_count,
             metrics,
@@ -1014,16 +1157,17 @@ fn plan_f2l_pairs_until(
     for plan in &mut plans {
         let mut step_start = cube;
         for step in &mut plan.steps {
-            if step.algorithm.len() > 1 {
-                for &budget in &exact_budgets {
-                    metrics.exact_target_searches += 1;
-                    if let Ok(candidate) = fast_to(&step_start, &step.end, max_depth, budget) {
-                        if candidate.len() < step.algorithm.len()
-                            && step_start.after_algorithm(&candidate) == step.end
-                        {
-                            step.algorithm = candidate;
-                            step.optimized = true;
-                        }
+            let folded_into_cross =
+                (f2l_pair_mask(&step_start).count_ones() as usize) < required_pairs;
+            if !folded_into_cross && step.algorithm.len() > 1 {
+                if let Some(candidate) = first_exact_candidate(&exact_budgets, |budget| {
+                    cached_fast_to(step_start, step.end, max_depth, budget, metrics)
+                }) {
+                    if candidate.len() < step.algorithm.len()
+                        && step_start.after_algorithm(&candidate) == step.end
+                    {
+                        step.algorithm = candidate;
+                        step.optimized = true;
                     }
                 }
             }
@@ -1088,26 +1232,32 @@ fn build_f2l_route(
     let mut cross_algorithm = Algorithm::new(cross_moves).simplified();
     let mut cross_optimized = false;
     if required_pairs > 0 {
-        for &budget in exact_budgets {
-            metrics.exact_target_searches += 1;
-            if let Ok(candidate) = fast_to(&cross_start, &cross_end, max_depth, budget) {
-                if candidate.len() < cross_algorithm.len()
-                    && cross_start.after_algorithm(&candidate) == cross_end
-                {
-                    cross_algorithm = candidate;
-                    cross_optimized = true;
-                }
+        if let Some(candidate) = first_exact_candidate(exact_budgets, |budget| {
+            cached_fast_to(cross_start, cross_end, max_depth, budget, metrics)
+        }) {
+            if candidate.len() < cross_algorithm.len()
+                && cross_start.after_algorithm(&candidate) == cross_end
+            {
+                cross_algorithm = candidate;
+                cross_optimized = true;
             }
         }
     }
 
     let remaining_steps = plan.steps.split_off(split_index);
+    let mut route_moves = cross_algorithm.moves().to_vec();
+    for step in &remaining_steps {
+        route_moves.extend(step.algorithm.moves().iter().copied());
+    }
+    route_moves.extend(plan.last_layer.combined.moves().iter().copied());
+    let move_count = Algorithm::new(route_moves).simplified().len();
     F2lRoute {
         cross_end,
         cross_algorithm,
         cross_optimized,
         remaining_steps,
         last_layer: plan.last_layer,
+        move_count,
     }
 }
 
@@ -1115,17 +1265,18 @@ fn beam_f2l_plan(
     cube: Cube,
     strategy: F2lStrategy,
     all_aufs: bool,
+    single_pair_only: bool,
     beam_width: usize,
     target_pair_count: usize,
     metrics: &mut SearchMetrics,
 ) -> Result<F2lPlan> {
+    if target_pair_count != 4 {
+        return Err(Error::Solver(
+            "F2L beam search currently requires a complete four-pair route".into(),
+        ));
+    }
     if f2l_pair_mask(&cube).count_ones() as usize >= target_pair_count {
-        let last_layer = if target_pair_count == 4 {
-            metrics.last_layer_evaluations += 1;
-            last_layer_algorithm(cube)?
-        } else {
-            Algorithm::default()
-        };
+        let last_layer = cached_last_layer_plan(cube, metrics)?;
         return Ok(F2lPlan {
             steps: Vec::new(),
             last_layer,
@@ -1137,7 +1288,7 @@ fn beam_f2l_plan(
         steps: Vec::new(),
         move_count: 0,
         priority: 0,
-        last_layer: Algorithm::default(),
+        last_layer: None,
     }];
     let mut complete = Vec::new();
     let mut first_error = None;
@@ -1145,11 +1296,11 @@ fn beam_f2l_plan(
     for _ in 0..4 {
         let mut next = Vec::new();
         for node in frontier {
-            match f2l_candidates(node.cube, strategy, all_aufs, metrics) {
+            let before = f2l_pair_mask(&node.cube);
+            match f2l_candidates(node.cube, strategy, all_aufs, single_pair_only, metrics) {
                 Ok(candidates) => {
                     for candidate in candidates {
-                        let before = f2l_pair_mask(&node.cube);
-                        let after = f2l_pair_mask(&candidate.end);
+                        let after = candidate.end_mask;
                         if after & before != before || after.count_ones() <= before.count_ones() {
                             continue;
                         }
@@ -1169,22 +1320,9 @@ fn beam_f2l_plan(
                             steps,
                             move_count,
                             priority: node.move_count + candidate.estimated_total,
-                            last_layer: Algorithm::default(),
+                            last_layer: None,
                         };
                         if after.count_ones() as usize >= target_pair_count {
-                            let mut expanded = expanded;
-                            if target_pair_count == 4 {
-                                metrics.last_layer_evaluations += 1;
-                                match last_layer_algorithm(expanded.cube) {
-                                    Ok(algorithm) => expanded.last_layer = algorithm,
-                                    Err(error) => {
-                                        if first_error.is_none() {
-                                            first_error = Some(error);
-                                        }
-                                        continue;
-                                    }
-                                }
-                            }
                             complete.push(expanded);
                         } else {
                             next.push(expanded);
@@ -1203,17 +1341,43 @@ fn beam_f2l_plan(
         }
         next.sort_by_key(|node| (node.priority, node.move_count));
         let mut states = HashSet::new();
-        next.retain(|node| states.insert(node.cube.facelets()));
+        next.retain(|node| states.insert(CubeKey::from(node.cube)));
         next.truncate(beam_width);
         frontier = next;
     }
 
+    complete.sort_by_key(|node| node.move_count);
+    let mut terminal_states = HashSet::new();
+    complete.retain(|node| terminal_states.insert(CubeKey::from(node.cube)));
+    for node in &mut complete {
+        match cached_last_layer_plan(node.cube, metrics) {
+            Ok(plan) => node.last_layer = Some(plan),
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+    complete.retain(|node| node.last_layer.is_some());
+
     complete
         .into_iter()
-        .min_by_key(|node| (node.move_count + node.last_layer.len(), node.move_count))
+        .min_by_key(|node| {
+            (
+                node.move_count
+                    + node
+                        .last_layer
+                        .as_ref()
+                        .map_or(0, |plan| plan.combined.len()),
+                node.move_count,
+            )
+        })
         .map(|node| F2lPlan {
             steps: node.steps,
-            last_layer: node.last_layer,
+            last_layer: node
+                .last_layer
+                .expect("complete F2L nodes have a last-layer plan"),
         })
         .ok_or_else(|| {
             first_error.unwrap_or_else(|| {
@@ -1222,30 +1386,33 @@ fn beam_f2l_plan(
         })
 }
 
-fn last_layer_algorithm(cube: Cube) -> Result<Algorithm> {
-    let (after_oll, oll, _) = run_cfop_stage(Stage::Oll, cube)?;
-    let (_, pll, _) = run_cfop_stage(Stage::Pll, after_oll)?;
-    let mut moves = oll.moves().to_vec();
-    moves.extend(pll.moves().iter().copied());
-    Ok(Algorithm::new(moves).simplified())
+fn cached_last_layer_plan(cube: Cube, metrics: &mut SearchMetrics) -> Result<LastLayerPlan> {
+    let key = CubeKey::from(cube);
+    if let Some(plan) = metrics.last_layer_cache.get(&key) {
+        return Ok(plan.clone());
+    }
+    metrics.last_layer_evaluations += 1;
+    let plan = LAST_LAYER_EVALUATOR.with(|evaluator| evaluator.borrow_mut().evaluate(cube))?;
+    metrics.last_layer_cache.insert(key, plan.clone());
+    Ok(plan)
 }
 
 fn f2l_candidates(
     cube: Cube,
     strategy: F2lStrategy,
     all_aufs: bool,
+    single_pair_only: bool,
     metrics: &mut SearchMetrics,
 ) -> Result<Vec<F2lCandidate>> {
-    let prefixes: &[&str] = if strategy == F2lStrategy::Lookahead && all_aufs {
-        &["", "U", "U2", "U'"]
+    let auf_count = if strategy == F2lStrategy::Lookahead && all_aufs {
+        4
     } else {
-        &[""]
+        1
     };
-    let mut candidates = Vec::with_capacity(prefixes.len());
+    let mut candidates = Vec::with_capacity(auf_count);
     let mut first_error = None;
-    for notation in prefixes {
-        metrics.f2l_candidates_evaluated += 1;
-        match f2l_candidate(cube, notation) {
+    for auf in 0..auf_count {
+        match cached_f2l_candidate(cube, auf as u8, !single_pair_only, metrics) {
             Ok(Some(candidate)) => candidates.push(candidate),
             Ok(None) => {}
             Err(error) => {
@@ -1257,7 +1424,7 @@ fn f2l_candidates(
     }
     candidates.sort_by_key(|candidate| (candidate.estimated_total, candidate.algorithm.len()));
     let mut states = HashSet::new();
-    candidates.retain(|candidate| states.insert(candidate.end.facelets()));
+    candidates.retain(|candidate| states.insert(CubeKey::from(candidate.end)));
     if candidates.is_empty() {
         Err(first_error.unwrap_or_else(|| {
             Error::Solver("F2L engine produced no cumulative pair transition".into())
@@ -1267,11 +1434,38 @@ fn f2l_candidates(
     }
 }
 
-fn f2l_candidate(cube: Cube, prefix_notation: &str) -> Result<Option<F2lCandidate>> {
-    let prefix: Algorithm = prefix_notation.parse()?;
-    let adjusted = cube.after_algorithm(&prefix);
-    let (_, remainder, repaired) = run_cfop_stage(Stage::F2l, adjusted)?;
-    let mut all_moves = prefix.moves().to_vec();
+fn cached_f2l_candidate(
+    cube: Cube,
+    auf: u8,
+    full_estimate: bool,
+    metrics: &mut SearchMetrics,
+) -> Result<Option<F2lCandidate>> {
+    let key = (CubeKey::from(cube), auf, full_estimate);
+    if let Some(candidate) = metrics.f2l_cache.get(&key) {
+        return Ok(candidate.clone());
+    }
+    metrics.f2l_candidates_evaluated += 1;
+    let candidate = f2l_candidate(cube, auf, full_estimate)?;
+    metrics.f2l_cache.insert(key, candidate.clone());
+    Ok(candidate)
+}
+
+fn f2l_candidate(cube: Cube, auf: u8, full_estimate: bool) -> Result<Option<F2lCandidate>> {
+    let prefix_move = match auf {
+        0 => None,
+        1 => Move::from_engine(rcuber::moves::Move::U),
+        2 => Move::from_engine(rcuber::moves::Move::U2),
+        3 => Move::from_engine(rcuber::moves::Move::U3),
+        _ => return Err(Error::Solver(format!("invalid F2L AUF index {auf}"))),
+    };
+    let adjusted = prefix_move.map_or(cube, |cube_move| cube.after_move(cube_move));
+    let (remainder, repaired) = if full_estimate {
+        let (_, algorithm, repaired) = run_cfop_stage(Stage::F2l, adjusted)?;
+        (algorithm, repaired)
+    } else {
+        next_f2l_pair_algorithm(adjusted)?
+    };
+    let mut all_moves = prefix_move.into_iter().collect::<Vec<_>>();
     all_moves.extend(remainder.moves().iter().copied());
     let full = Algorithm::new(all_moves).simplified();
     let estimated_total = full.len();
@@ -1288,9 +1482,9 @@ fn f2l_candidate(cube: Cube, prefix_notation: &str) -> Result<Option<F2lCandidat
         let gained = (after & !before).count_ones();
         if retained && gained > 0 && stage_is_solved(Stage::Cross, &replay) {
             let algorithm = Algorithm::new(prefix_moves.clone()).simplified();
-            let end = cube.after_algorithm(&algorithm);
             let candidate = F2lCandidate {
-                end,
+                end: replay,
+                end_mask: after,
                 algorithm,
                 pairs: f2l_pairs(after & !before),
                 estimated_total,
@@ -1420,26 +1614,65 @@ fn run_cfop_stage(stage: Stage, cube: Cube) -> Result<(Cube, Algorithm, bool)> {
     }));
     match outcome {
         Ok(Ok((engine_state, algorithm))) => {
-            let replayed = cube.after_algorithm(&algorithm);
-            if stage_is_solved(stage, &replayed) {
-                // Some upstream stage routines probe by mutating their internal cube.
-                // Only the independently replayed move sequence is authoritative.
-                return Ok((replayed, algorithm, false));
-            }
-            if stage_is_solved(stage, &engine_state) {
-                let repaired = fast_to(&cube, &engine_state, 30, 1_000_000)?;
-                let replayed = cube.after_algorithm(&repaired);
-                if replayed == engine_state && stage_is_solved(stage, &replayed) {
-                    return Ok((replayed, repaired, true));
-                }
-            }
-            Err(Error::Solver(format!(
-                "{stage}: replaying the returned moves did not satisfy the phase invariant"
-            )))
+            reconcile_stage_transition(stage, cube, engine_state, algorithm)
         }
         Ok(Err(message)) => Err(Error::Solver(format!("{stage}: {message}"))),
         Err(_) => Err(Error::Solver(format!("{stage} engine panicked"))),
     }
+}
+
+fn next_f2l_pair_algorithm(cube: Cube) -> Result<(Algorithm, bool)> {
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        let mut solver = F2LSolver { cube: cube.inner };
+        let moves = solver.solve_to_next_pair_boundary();
+        (Cube { inner: solver.cube }, Algorithm::from_engines(moves))
+    }))
+    .map_err(|_| Error::Solver("F2L pair engine panicked".into()))?;
+    let (engine_end, algorithm) = outcome;
+    let before = f2l_pair_mask(&cube);
+    let made_progress = |candidate: &Cube| {
+        let after = f2l_pair_mask(candidate);
+        stage_is_solved(Stage::Cross, candidate)
+            && after & before == before
+            && after.count_ones() > before.count_ones()
+    };
+    let replayed = cube.after_algorithm(&algorithm);
+    if made_progress(&replayed) {
+        return Ok((algorithm, false));
+    }
+    if made_progress(&engine_end) {
+        let repaired = fast_to(&cube, &engine_end, 30, 1_000_000)?;
+        if cube.after_algorithm(&repaired) == engine_end {
+            return Ok((repaired, true));
+        }
+    }
+    Err(Error::Solver(
+        "F2L pair engine did not make cumulative progress".into(),
+    ))
+}
+
+fn reconcile_stage_transition(
+    stage: Stage,
+    start: Cube,
+    engine_end: Cube,
+    algorithm: Algorithm,
+) -> Result<(Cube, Algorithm, bool)> {
+    let replayed = start.after_algorithm(&algorithm);
+    if stage_is_solved(stage, &replayed) {
+        // Some upstream stage routines probe by mutating their internal cube.
+        // Only the independently replayed move sequence is authoritative.
+        return Ok((replayed, algorithm, false));
+    }
+    if stage_is_solved(stage, &engine_end) {
+        let repaired = fast_to(&start, &engine_end, 30, 1_000_000)?;
+        let replayed = start.after_algorithm(&repaired);
+        if replayed == engine_end && stage_is_solved(stage, &replayed) {
+            return Ok((replayed, repaired, true));
+        }
+    }
+    Err(Error::Solver(format!(
+        "{stage}: replaying the returned moves did not satisfy the phase invariant"
+    )))
 }
 
 fn stage_is_solved(stage: Stage, cube: &Cube) -> bool {
@@ -1455,10 +1688,25 @@ fn stage_is_solved(stage: Stage, cube: &Cube) -> bool {
         Stage::XXXCross => {
             CrossSolver { cube: cube.inner }.is_solved() && f2l_pair_mask(cube).count_ones() >= 3
         }
-        Stage::F2l => F2LSolver { cube: cube.inner }.is_solved(),
+        Stage::F2l => {
+            let solved = rcuber::cubie::SOLVED_CUBIE_CUBE;
+            cube.inner.center == solved.center
+                && cube.inner.cp[4..8] == solved.cp[4..8]
+                && cube.inner.co[4..8] == solved.co[4..8]
+                && cube.inner.ep[4..12] == solved.ep[4..12]
+                && cube.inner.eo[4..12] == solved.eo[4..12]
+        }
         Stage::F2lPair => CrossSolver { cube: cube.inner }.is_solved() && f2l_pair_mask(cube) != 0,
-        Stage::Oll => OLLSolver::new(cube.inner).is_solved(),
-        Stage::Pll => PLLSolver::new(cube.inner).is_solved(),
+        Stage::Oll => {
+            let solved = rcuber::cubie::SOLVED_CUBIE_CUBE;
+            (0..4).all(|index| {
+                cube.inner.cp[0..4].contains(&solved.cp[index])
+                    && cube.inner.co[index] == 0
+                    && cube.inner.ep[0..4].contains(&solved.ep[index])
+                    && cube.inner.eo[index] == 0
+            })
+        }
+        Stage::Pll => cube.is_canonically_solved(),
         Stage::Fast => cube.is_solved(),
     }
 }
@@ -1499,6 +1747,38 @@ fn fast_to(from: &Cube, goal: &Cube, max_depth: usize, probe_limit: u64) -> Resu
             "stage transition reconstruction engine panicked".into(),
         )),
     }
+}
+
+fn cached_fast_to(
+    from: Cube,
+    goal: Cube,
+    max_depth: usize,
+    probe_limit: u64,
+    metrics: &mut SearchMetrics,
+) -> Option<Algorithm> {
+    let key = ExactSearchKey {
+        from: CubeKey::from(from),
+        goal: CubeKey::from(goal),
+        max_depth,
+        probe_limit,
+    };
+    if let Some(candidate) = metrics.exact_cache.get(&key) {
+        return candidate.clone();
+    }
+    metrics.exact_target_searches += 1;
+    let candidate = fast_to(&from, &goal, max_depth, probe_limit).ok();
+    metrics.exact_cache.insert(key, candidate.clone());
+    candidate
+}
+
+fn first_exact_candidate(
+    budgets: &[u64],
+    mut search: impl FnMut(u64) -> Option<Algorithm>,
+) -> Option<Algorithm> {
+    // min2phase returns the first deterministic solution when probe_min is zero.
+    // A larger ceiling can only help after ProbeLimitExceeded, so stop after the
+    // first success instead of restarting the same successful search.
+    budgets.iter().find_map(|&budget| search(budget))
 }
 
 fn fast_alternatives(
@@ -1702,5 +1982,16 @@ mod tests {
         assert!(result.solution.is_empty());
         assert_eq!(result.alternatives.len(), 3);
         assert!(result.alternatives.iter().all(|item| item.verified));
+    }
+
+    #[test]
+    fn exact_budget_fallback_stops_after_the_first_success() {
+        let mut visited = Vec::new();
+        let result = first_exact_candidate(&[100, 500, 1_000], |budget| {
+            visited.push(budget);
+            (budget == 500).then(Algorithm::default)
+        });
+        assert!(result.is_some());
+        assert_eq!(visited, [100, 500]);
     }
 }

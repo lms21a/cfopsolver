@@ -11,17 +11,8 @@ pub struct Move(pub(crate) EngineMove);
 
 impl Move {
     pub fn inverse(self) -> Self {
-        let notation = self.to_string();
-        let inverse = if notation.ends_with('2') {
-            notation
-        } else if let Some(base) = notation.strip_suffix('\'') {
-            base.to_owned()
-        } else {
-            format!("{notation}'")
-        };
-        inverse
-            .parse()
-            .expect("an engine move always has an inverse")
+        let (layer, turns) = self.base_and_turns();
+        Self::from_layer_and_turns(layer, 4 - turns)
     }
 
     pub(crate) fn engine(self) -> EngineMove {
@@ -32,15 +23,71 @@ impl Move {
         (value != EngineMove::N).then_some(Self(value))
     }
 
-    fn base_and_turns(self) -> (String, u8) {
-        let notation = self.to_string();
-        if let Some(base) = notation.strip_suffix('2') {
-            (base.to_owned(), 2)
-        } else if let Some(base) = notation.strip_suffix('\'') {
-            (base.to_owned(), 3)
-        } else {
-            (notation, 1)
-        }
+    fn base_and_turns(self) -> (usize, u8) {
+        let index = self.0 as usize;
+        debug_assert!(index < 54, "validated moves never contain N");
+        (index / 3, (index % 3 + 1) as u8)
+    }
+
+    fn from_layer_and_turns(layer: usize, turns: u8) -> Self {
+        const MOVES: [EngineMove; 54] = [
+            EngineMove::U,
+            EngineMove::U2,
+            EngineMove::U3,
+            EngineMove::R,
+            EngineMove::R2,
+            EngineMove::R3,
+            EngineMove::F,
+            EngineMove::F2,
+            EngineMove::F3,
+            EngineMove::D,
+            EngineMove::D2,
+            EngineMove::D3,
+            EngineMove::L,
+            EngineMove::L2,
+            EngineMove::L3,
+            EngineMove::B,
+            EngineMove::B2,
+            EngineMove::B3,
+            EngineMove::M,
+            EngineMove::M2,
+            EngineMove::M3,
+            EngineMove::E,
+            EngineMove::E2,
+            EngineMove::E3,
+            EngineMove::S,
+            EngineMove::S2,
+            EngineMove::S3,
+            EngineMove::Uw,
+            EngineMove::Uw2,
+            EngineMove::Uw3,
+            EngineMove::Rw,
+            EngineMove::Rw2,
+            EngineMove::Rw3,
+            EngineMove::Fw,
+            EngineMove::Fw2,
+            EngineMove::Fw3,
+            EngineMove::Dw,
+            EngineMove::Dw2,
+            EngineMove::Dw3,
+            EngineMove::Lw,
+            EngineMove::Lw2,
+            EngineMove::Lw3,
+            EngineMove::Bw,
+            EngineMove::Bw2,
+            EngineMove::Bw3,
+            EngineMove::x,
+            EngineMove::x2,
+            EngineMove::x3,
+            EngineMove::y,
+            EngineMove::y2,
+            EngineMove::y3,
+            EngineMove::z,
+            EngineMove::z2,
+            EngineMove::z3,
+        ];
+        debug_assert!((1..=3).contains(&turns));
+        Self(MOVES[layer * 3 + turns as usize - 1])
     }
 }
 
@@ -133,12 +180,7 @@ impl Algorithm {
                     result.pop();
                     let turns = (last_turns + next_turns) % 4;
                     if turns != 0 {
-                        let suffix = match turns {
-                            2 => "2",
-                            3 => "'",
-                            _ => "",
-                        };
-                        result.push(format!("{last_base}{suffix}").parse().expect("valid merge"));
+                        result.push(Move::from_layer_and_turns(last_base, turns));
                     }
                     continue;
                 }
