@@ -7,8 +7,8 @@ use pyo3::{
 };
 
 use crate::{
-    generate_dataset, generate_to_jsonl, Cube, Difficulty, Error, GenerateConfig, SolveConfig,
-    SolveMethod, Solver,
+    generate_dataset, generate_to_jsonl, CrossMode, Cube, Difficulty, Error, F2lStrategy,
+    GenerateConfig, SolveConfig, SolveMethod, Solver,
 };
 
 fn python_error(error: Error) -> PyErr {
@@ -106,7 +106,8 @@ struct PySolver {
 #[pymethods]
 impl PySolver {
     #[new]
-    #[pyo3(signature = (method="cfop", trace=false, exploration=false, max_exploration_states=72, alternatives=0, max_depth=30, probe_limit=1_000_000))]
+    #[pyo3(signature = (method="cfop", trace=false, exploration=false, max_exploration_states=72, alternatives=0, max_depth=30, probe_limit=1_000_000, cross="cross", f2l="lookahead"))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         method: &str,
         trace: bool,
@@ -115,11 +116,17 @@ impl PySolver {
         alternatives: usize,
         max_depth: usize,
         probe_limit: u64,
+        cross: &str,
+        f2l: &str,
     ) -> PyResult<Self> {
         let method = method.parse().map_err(python_error)?;
+        let cross_mode: CrossMode = cross.parse().map_err(python_error)?;
+        let f2l_strategy: F2lStrategy = f2l.parse().map_err(python_error)?;
         Ok(Self {
             inner: Solver::new(SolveConfig {
                 method,
+                cross_mode,
+                f2l_strategy,
                 trace,
                 exploration,
                 max_exploration_states,
@@ -170,7 +177,7 @@ fn verify_solution(state: &str, solution: &str) -> PyResult<bool> {
 
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (count, seed=0, difficulty="hard", scramble_length=0, solutions_per_scramble=1, method="fast", threads=0, trace=false, exploration=false))]
+#[pyo3(signature = (count, seed=0, difficulty="hard", scramble_length=0, solutions_per_scramble=1, method="fast", threads=0, trace=false, exploration=false, cross="cross", f2l="lookahead"))]
 fn generate(
     py: Python<'_>,
     count: usize,
@@ -182,6 +189,8 @@ fn generate(
     threads: usize,
     trace: bool,
     exploration: bool,
+    cross: &str,
+    f2l: &str,
 ) -> PyResult<PyObject> {
     let config = py_generate_config(
         count,
@@ -193,6 +202,8 @@ fn generate(
         threads,
         trace,
         exploration,
+        cross,
+        f2l,
     )?;
     let records = py
         .allow_threads(|| generate_dataset(&config))
@@ -202,7 +213,7 @@ fn generate(
 
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (path, count, seed=0, difficulty="hard", scramble_length=0, solutions_per_scramble=1, method="fast", threads=0, batch_size=1024, trace=false, exploration=false))]
+#[pyo3(signature = (path, count, seed=0, difficulty="hard", scramble_length=0, solutions_per_scramble=1, method="fast", threads=0, batch_size=1024, trace=false, exploration=false, cross="cross", f2l="lookahead"))]
 fn generate_jsonl(
     py: Python<'_>,
     path: PathBuf,
@@ -216,6 +227,8 @@ fn generate_jsonl(
     batch_size: usize,
     trace: bool,
     exploration: bool,
+    cross: &str,
+    f2l: &str,
 ) -> PyResult<()> {
     let config = py_generate_config(
         count,
@@ -227,6 +240,8 @@ fn generate_jsonl(
         threads,
         trace,
         exploration,
+        cross,
+        f2l,
     )?;
     py.allow_threads(|| generate_to_jsonl(&config, path, batch_size))
         .map_err(python_error)
@@ -243,6 +258,8 @@ fn py_generate_config(
     threads: usize,
     trace: bool,
     exploration: bool,
+    cross: &str,
+    f2l: &str,
 ) -> PyResult<GenerateConfig> {
     let difficulty = match difficulty.to_ascii_lowercase().as_str() {
         "easy" => Difficulty::Easy,
@@ -255,6 +272,8 @@ fn py_generate_config(
         }
     };
     let method: SolveMethod = method.parse().map_err(python_error)?;
+    let cross_mode: CrossMode = cross.parse().map_err(python_error)?;
+    let f2l_strategy: F2lStrategy = f2l.parse().map_err(python_error)?;
     Ok(GenerateConfig {
         count,
         seed,
@@ -262,6 +281,8 @@ fn py_generate_config(
         scramble_length,
         solutions_per_scramble,
         method,
+        cross_mode,
+        f2l_strategy,
         trace,
         exploration,
         max_exploration_states: 72,

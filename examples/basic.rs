@@ -1,9 +1,11 @@
-use cfop_solver::{Cube, SolveConfig, SolveMethod, Solver};
+use cfop_solver::{CrossMode, Cube, F2lStrategy, SolveConfig, SolveMethod, Solver};
 
 fn main() -> cfop_solver::Result<()> {
     let cube = Cube::from_scramble("R U2 F' L D")?;
     let result = Solver::new(SolveConfig {
         method: SolveMethod::Cfop,
+        cross_mode: CrossMode::XXCross,
+        f2l_strategy: F2lStrategy::Lookahead,
         trace: true,
         exploration: true,
         max_exploration_states: 12,

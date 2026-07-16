@@ -10,11 +10,11 @@ use rayon::{prelude::*, ThreadPoolBuilder};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Algorithm, Cube, Error, ExplorationEvent, Result, SolveConfig, SolveMethod, Solver,
-    StageResult, TraceEvent,
+    Algorithm, CrossMode, Cube, Error, ExplorationEvent, F2lStrategy, Result, SolveConfig,
+    SolveMethod, Solver, StageResult, TraceEvent,
 };
 
-pub const DATASET_SCHEMA: &str = "cfop-dataset/v1";
+pub const DATASET_SCHEMA: &str = "cfop-dataset/v2";
 pub const STATE_FORMAT: &str = "facelets-urfdlb-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,6 +51,8 @@ pub struct GenerateConfig {
     pub scramble_length: usize,
     pub solutions_per_scramble: usize,
     pub method: SolveMethod,
+    pub cross_mode: CrossMode,
+    pub f2l_strategy: F2lStrategy,
     pub trace: bool,
     pub exploration: bool,
     pub max_exploration_states: usize,
@@ -67,6 +69,8 @@ impl Default for GenerateConfig {
             scramble_length: 0,
             solutions_per_scramble: 1,
             method: SolveMethod::Fast,
+            cross_mode: CrossMode::Cross,
+            f2l_strategy: F2lStrategy::Lookahead,
             trace: false,
             exploration: false,
             max_exploration_states: 72,
@@ -79,6 +83,10 @@ impl Default for GenerateConfig {
 pub struct GeneratedSolution {
     pub source: String,
     pub method: SolveMethod,
+    #[serde(default)]
+    pub cross_mode: CrossMode,
+    #[serde(default)]
+    pub f2l_strategy: F2lStrategy,
     pub moves: Algorithm,
     pub move_count: usize,
     pub verified: bool,
@@ -196,6 +204,8 @@ fn generate_one(config: &GenerateConfig, index: usize) -> Result<GeneratedSample
     let cube = Cube::solved().after_algorithm(&scramble);
     let solve_config = SolveConfig {
         method: config.method,
+        cross_mode: config.cross_mode,
+        f2l_strategy: config.f2l_strategy,
         trace: config.trace,
         exploration: config.exploration,
         max_exploration_states: config.max_exploration_states,
@@ -216,6 +226,8 @@ fn generate_one(config: &GenerateConfig, index: usize) -> Result<GeneratedSample
     solutions.push(GeneratedSolution {
         source: "solver_primary".into(),
         method: config.method,
+        cross_mode: config.cross_mode,
+        f2l_strategy: config.f2l_strategy,
         moves: result.solution.clone(),
         move_count: result.solution.len(),
         verified: result.verified,
@@ -231,6 +243,8 @@ fn generate_one(config: &GenerateConfig, index: usize) -> Result<GeneratedSample
             GeneratedSolution {
                 source: "scramble_inverse".into(),
                 method: SolveMethod::Fast,
+                cross_mode: config.cross_mode,
+                f2l_strategy: config.f2l_strategy,
                 move_count: inverse.len(),
                 verified: cube.after_algorithm(&inverse).is_solved(),
                 moves: inverse,
@@ -246,6 +260,8 @@ fn generate_one(config: &GenerateConfig, index: usize) -> Result<GeneratedSample
             GeneratedSolution {
                 source: alternative.source,
                 method: SolveMethod::Fast,
+                cross_mode: config.cross_mode,
+                f2l_strategy: config.f2l_strategy,
                 move_count: alternative.move_count,
                 verified: alternative.verified,
                 moves: alternative.algorithm,
@@ -318,6 +334,8 @@ fn add_verified_identity_variants(
             GeneratedSolution {
                 source: "verified_identity_variant".into(),
                 method: solutions[0].method,
+                cross_mode: solutions[0].cross_mode,
+                f2l_strategy: solutions[0].f2l_strategy,
                 move_count: variant.len(),
                 verified: cube.after_algorithm(&variant).is_solved(),
                 moves: variant,
@@ -395,5 +413,62 @@ mod tests {
         write_jsonl(&records, file.path()).unwrap();
         let contents = std::fs::read_to_string(file.path()).unwrap();
         assert_eq!(contents.lines().count(), 2);
+    }
+
+    #[test]
+    fn every_advanced_cross_mode_generates_verified_records() {
+        for cross_mode in [
+            CrossMode::Cross,
+            CrossMode::XCross,
+            CrossMode::XXCross,
+            CrossMode::XXXCross,
+        ] {
+            let records = generate_dataset(&GenerateConfig {
+                count: 4,
+                seed: 20260715,
+                difficulty: Difficulty::Hard,
+                method: SolveMethod::Cfop,
+                cross_mode,
+                threads: 2,
+                ..GenerateConfig::default()
+            })
+            .unwrap();
+            assert!(records.iter().all(|record| {
+                record.schema == DATASET_SCHEMA
+                    && record.solutions[0].verified
+                    && record.solutions[0].cross_mode == cross_mode
+            }));
+        }
+    }
+
+    #[test]
+    fn lookahead_reduces_aggregate_f2l_work() {
+        let base = GenerateConfig {
+            count: 12,
+            seed: 99,
+            difficulty: Difficulty::Hard,
+            method: SolveMethod::Cfop,
+            threads: 2,
+            ..GenerateConfig::default()
+        };
+        let standard = generate_dataset(&GenerateConfig {
+            f2l_strategy: F2lStrategy::Standard,
+            ..base
+        })
+        .unwrap();
+        let lookahead = generate_dataset(&GenerateConfig {
+            f2l_strategy: F2lStrategy::Lookahead,
+            ..base
+        })
+        .unwrap();
+        let f2l_moves = |records: &[GeneratedSample]| {
+            records
+                .iter()
+                .flat_map(|record| &record.solutions[0].stages)
+                .filter(|stage| stage.stage == crate::Stage::F2lPair)
+                .map(|stage| stage.move_count)
+                .sum::<usize>()
+        };
+        assert!(f2l_moves(&lookahead) < f2l_moves(&standard));
     }
 }

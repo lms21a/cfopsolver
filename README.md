@@ -11,8 +11,10 @@ validation, solution verification, and deterministic parallel JSONL generation.
 - All face, slice, wide, and rotation moves (`U` through `B`, `M/E/S`, `Uw` through
   `Bw`, and `x/y/z`) with prime and double suffixes.
 - Mutable, immutable, and stateless move-application APIs.
-- A real `cross -> f2l -> oll -> pll` solving pipeline with independently replayed
-  and checked phase invariants.
+- Configurable `cross`, `xcross`, `xxcross`, and `xxxcross` openings followed by
+  independently traced F2L pair insertions, OLL, and PLL.
+- Standard and dynamic-lookahead F2L strategies with independently replayed and
+  checked phase invariants.
 - A fast two-phase solver for high-throughput use.
 - Toggleable structured decision traces and separately bounded exploratory states.
 - Distinct alternative solutions and deterministic easy/medium/hard scramble generation.
@@ -37,7 +39,7 @@ frames, and combined corner/edge/center parity.
 ## Rust
 
 ```rust
-use cfop_solver::{Cube, SolveConfig, Solver};
+use cfop_solver::{CrossMode, Cube, F2lStrategy, SolveConfig, Solver};
 
 let cube = Cube::from_scramble("R U2 F' L D")?;
 
@@ -51,6 +53,8 @@ cursor.apply("D' L'")?.apply("F U2 R'")?;
 assert!(cursor.is_solved());
 
 let result = Solver::new(SolveConfig {
+    cross_mode: CrossMode::XXCross,
+    f2l_strategy: F2lStrategy::Lookahead,
     trace: true,
     exploration: true,
     alternatives: 2,
@@ -69,6 +73,12 @@ state before it is returned. Alternative entries include `source`, `algorithm`,
 `move_count`, and `verified`; if continued search cannot produce the requested count,
 the solver fills it with explicitly labeled `verified_identity_variant` results rather
 than silently returning fewer solutions.
+
+`CrossMode::XCross`, `XXCross`, and `XXXCross` require the opening phase to finish
+the bottom cross together with at least one, two, or three F2L pairs. Exact-target
+search may shorten that combined phase while preserving its chosen endpoint.
+`F2lStrategy::Lookahead` evaluates alternative U-face alignments before each pair and
+is the default; `Standard` keeps the simpler deterministic route.
 
 ## Python
 
@@ -95,6 +105,8 @@ assert cube.verify("D' L' F U2 R'")
 
 solver = cfop.Solver(
     method="cfop",
+    cross="xxcross",
+    f2l="lookahead",
     trace=True,
     exploration=True,
     max_exploration_states=64,
@@ -113,8 +125,11 @@ dict/list/string values and are immediately JSON-serializable.
 
 ## Decision and exploration output
 
-Tracing is off by default. `trace=True` emits phase starts, the selected algorithm,
+Tracing is off by default. `trace=True` emits phase starts, the selected moves,
 the reason for the decision, phase completion, timings, and optional canonical states.
+F2L emits a separate `f2l_pair` phase for every remaining pair; each event identifies
+the exact `f2l_pairs` involved. Pairs already completed by an advanced cross are listed
+on that opening phase.
 
 Exploration is a separate option because it can be much larger. When enabled, the
 solver records bounded one-ply alternatives for the stage, their move, resulting state,
@@ -122,10 +137,13 @@ progress score, and whether the branch was selected or backtracked. Set
 `max_exploration_states` to enforce the desired cap. No exploratory state strings are
 created on the disabled path.
 
-Each phase has `start_state`, `end_state`, `algorithm`, `move_count`, timing, and a
-`repaired` marker. The marker is set only if a mutable upstream stage diverges from its
-returned move list; in that case the same phase endpoint is reconstructed by an
-independent search and replayed before being returned.
+Each phase has `start_state`, `end_state`, `moves`, `move_count`, timing,
+`f2l_pairs`, `optimized`, and a `repaired` marker. Trace decisions and completions use
+the same `moves` key, so phase actions do not need to be recovered from prose. The
+`repaired` marker is set only if a mutable upstream stage diverges from its returned
+move list; `optimized` means exact-target search found a shorter route to the same
+verified endpoint. Dataset records using this expanded structure declare
+`schema: "cfop-dataset/v2"`.
 
 ## Bulk generation
 
@@ -138,6 +156,20 @@ records = cfop.generate(
     difficulty="hard",
     solutions_per_scramble=2,
     method="fast",
+    threads=8,
+)
+```
+
+For traced CFOP training data, the same options are available during generation:
+
+```python
+records = cfop.generate(
+    10_000,
+    seed=42,
+    method="cfop",
+    cross="xxcross",
+    f2l="lookahead",
+    trace=True,
     threads=8,
 )
 ```
@@ -173,7 +205,8 @@ variants only as an explicitly labeled final fallback.
 ## CLI
 
 ```bash
-cfop solve --scramble "R U F" --method cfop --trace --explore --json
+cfop solve --scramble "R U F" --method cfop \
+  --cross xxcross --f2l lookahead --trace --explore --json
 cfop apply --state "$STATE" --moves "R U R' U'"
 cfop verify --scramble "R U F" --solution "F' U' R'"
 cfop generate --count 1000 --output data.jsonl --solutions 2 --threads 4
@@ -181,11 +214,13 @@ cfop generate --count 1000 --output data.jsonl --solutions 2 --threads 4
 
 ## Performance snapshot
 
-On the development machine, the release binary generated and verified 1,000 hard
-records with two solutions each in 0.53 seconds on four threads (about 1,900 records/s).
-A 100-scramble staged-CFOP stress run finished in 0.06 seconds on four threads, with
-all phase boundaries and final solutions replay-verified. Treat these as a local
-snapshot; hardware and scramble/alternative settings materially affect throughput.
+On the development machine, the release binary generated and verified 2,000 hard
+standard-F2L CFOP records in 1.22 seconds on four threads (about 1,640 records/s).
+Dynamic-lookahead F2L generated the same 2,000 seeded records in 2.08 seconds (about
+960 records/s); XXX-cross plus lookahead generated 1,000 in 1.56 seconds (about 640
+records/s). On the shared 2,000 scrambles, lookahead reduced mean F2L work from 32.65
+to 30.49 moves and mean full solutions from 64.21 to 61.94 moves. Treat these as a
+local snapshot; hardware, trace output, and solver options materially affect throughput.
 
 ## Development
 

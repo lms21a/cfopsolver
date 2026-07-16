@@ -1,4 +1,8 @@
-use cfop_solver::{Cube, SolveConfig, SolveMethod, Solver, Stage};
+use std::collections::HashSet;
+
+use cfop_solver::{
+    CrossMode, Cube, F2lStrategy, SolveConfig, SolveMethod, Solver, Stage, TraceEvent,
+};
 
 #[test]
 fn every_supported_move_round_trips_with_its_inverse() {
@@ -59,17 +63,97 @@ fn staged_cfop_replays_phase_boundaries_on_varied_scrambles() {
     for scramble in scrambles {
         let cube = Cube::from_scramble(scramble).unwrap();
         let result = solver.solve(&cube).unwrap();
-        assert_eq!(
-            result
-                .stages
-                .iter()
-                .map(|stage| stage.stage)
-                .collect::<Vec<_>>(),
-            vec![Stage::Cross, Stage::F2l, Stage::Oll, Stage::Pll]
-        );
+        assert_eq!(result.stages.first().unwrap().stage, Stage::Cross);
+        assert_eq!(result.stages[result.stages.len() - 2].stage, Stage::Oll);
+        assert_eq!(result.stages.last().unwrap().stage, Stage::Pll);
+        let pairs = result
+            .stages
+            .iter()
+            .flat_map(|stage| stage.f2l_pairs.iter().copied())
+            .collect::<Vec<_>>();
+        assert_eq!(pairs.len(), 4);
+        assert_eq!(pairs.iter().copied().collect::<HashSet<_>>().len(), 4);
         assert!(cube.after_algorithm(&result.solution).is_solved());
+        for stage in &result.stages {
+            let replay = Cube::from_facelets(&stage.start_state)
+                .unwrap()
+                .after_algorithm(&stage.algorithm);
+            assert_eq!(replay.facelets(), stage.end_state);
+        }
         for adjacent in result.stages.windows(2) {
             assert_eq!(adjacent[0].end_state, adjacent[1].start_state);
+        }
+    }
+}
+
+#[test]
+fn advanced_cross_modes_include_the_requested_number_of_pairs() {
+    let cube = Cube::from_scramble("D R2 B2 L2 F L B' R' L D F U' B2 D' L R2 F2 L2 F' B'").unwrap();
+    for (mode, expected_stage, minimum_pairs) in [
+        (CrossMode::Cross, Stage::Cross, 0),
+        (CrossMode::XCross, Stage::XCross, 1),
+        (CrossMode::XXCross, Stage::XXCross, 2),
+        (CrossMode::XXXCross, Stage::XXXCross, 3),
+    ] {
+        let result = Solver::new(SolveConfig {
+            cross_mode: mode,
+            trace: true,
+            ..SolveConfig::default()
+        })
+        .solve(&cube)
+        .unwrap();
+        let cross = &result.stages[0];
+        assert_eq!(cross.stage, expected_stage);
+        assert!(cross.f2l_pairs.len() >= minimum_pairs);
+
+        let all_pairs = result
+            .stages
+            .iter()
+            .flat_map(|stage| stage.f2l_pairs.iter().copied())
+            .collect::<Vec<_>>();
+        assert_eq!(all_pairs.len(), 4);
+        assert_eq!(all_pairs.iter().copied().collect::<HashSet<_>>().len(), 4);
+        assert!(cube.after_algorithm(&result.solution).is_solved());
+        assert_trace_moves_are_attached(&result.trace);
+    }
+}
+
+#[test]
+fn lookahead_reduces_f2l_moves_on_the_reference_scramble() {
+    let cube = Cube::from_scramble("D R2 B2 L2 F L B' R' L D F U' B2 D' L R2 F2 L2 F' B'").unwrap();
+    let solve = |f2l_strategy| {
+        Solver::new(SolveConfig {
+            f2l_strategy,
+            ..SolveConfig::default()
+        })
+        .solve(&cube)
+        .unwrap()
+    };
+    let standard = solve(F2lStrategy::Standard);
+    let lookahead = solve(F2lStrategy::Lookahead);
+    let f2l_moves = |result: &cfop_solver::SolveResult| {
+        result
+            .stages
+            .iter()
+            .filter(|stage| stage.stage == Stage::F2lPair)
+            .map(|stage| stage.move_count)
+            .sum::<usize>()
+    };
+    assert!(f2l_moves(&lookahead) < f2l_moves(&standard));
+}
+
+fn assert_trace_moves_are_attached(trace: &[TraceEvent]) {
+    assert!(!trace.is_empty());
+    for event in trace {
+        if !matches!(event.kind, cfop_solver::solver::TraceKind::PhaseStart) {
+            assert!(event.algorithm.is_some(), "missing moves on {event:?}");
+        }
+    }
+    let encoded = serde_json::to_value(trace).unwrap();
+    for event in encoded.as_array().unwrap() {
+        if event["kind"] != "phase_start" {
+            assert!(event.get("moves").is_some());
+            assert!(event.get("algorithm").is_none());
         }
     }
 }

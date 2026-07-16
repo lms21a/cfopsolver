@@ -1,7 +1,8 @@
 use std::{collections::HashMap, env, process};
 
 use cfop_solver::{
-    generate_to_jsonl, Cube, Difficulty, GenerateConfig, SolveConfig, SolveMethod, Solver,
+    generate_to_jsonl, CrossMode, Cube, Difficulty, F2lStrategy, GenerateConfig, SolveConfig,
+    SolveMethod, Solver,
 };
 
 fn main() {
@@ -23,6 +24,12 @@ fn run() -> cfop_solver::Result<()> {
             let cube = input_cube(&options)?;
             let config = SolveConfig {
                 method: option(&options, "method").unwrap_or("cfop").parse()?,
+                cross_mode: option(&options, "cross")
+                    .unwrap_or("cross")
+                    .parse::<CrossMode>()?,
+                f2l_strategy: option(&options, "f2l")
+                    .unwrap_or("lookahead")
+                    .parse::<F2lStrategy>()?,
                 trace: flag(&options, "trace"),
                 exploration: flag(&options, "explore"),
                 max_exploration_states: number(&options, "max-exploration", 72)?,
@@ -72,6 +79,12 @@ fn run() -> cfop_solver::Result<()> {
                 method: option(&options, "method")
                     .unwrap_or("fast")
                     .parse::<SolveMethod>()?,
+                cross_mode: option(&options, "cross")
+                    .unwrap_or("cross")
+                    .parse::<CrossMode>()?,
+                f2l_strategy: option(&options, "f2l")
+                    .unwrap_or("lookahead")
+                    .parse::<F2lStrategy>()?,
                 trace: flag(&options, "trace"),
                 exploration: flag(&options, "explore"),
                 max_exploration_states: number(&options, "max-exploration", 72)?,
@@ -161,9 +174,9 @@ where
 fn print_usage() {
     println!(
         "cfop-solver\n\n\
-         solve    [--scramble MOVES | --state FACELETS] [--method cfop|fast] [--trace] [--explore] [--alternatives N] [--json]\n\
+         solve    [--scramble MOVES | --state FACELETS] [--method cfop|fast] [--cross cross|xcross|xxcross|xxxcross] [--f2l standard|lookahead] [--trace] [--explore] [--alternatives N] [--json]\n\
          apply    [--scramble MOVES | --state FACELETS] --moves MOVES\n\
          verify   [--scramble MOVES | --state FACELETS] --solution MOVES\n\
-         generate --count N --output FILE [--difficulty easy|medium|hard] [--solutions N] [--threads N]"
+         generate --count N --output FILE [--difficulty easy|medium|hard] [--cross MODE] [--f2l STRATEGY] [--solutions N] [--threads N]"
     );
 }

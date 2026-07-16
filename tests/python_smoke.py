@@ -11,6 +11,8 @@ def test_python_api() -> None:
 
     result = cfop.Solver(
         method="cfop",
+        cross="xcross",
+        f2l="lookahead",
         trace=True,
         exploration=True,
         max_exploration_states=8,
@@ -19,12 +21,12 @@ def test_python_api() -> None:
     assert result["verified"]
     assert len(result["alternatives"]) == 1
     assert result["alternatives"][0]["verified"]
-    assert [stage["stage"] for stage in result["stages"]] == [
-        "cross",
-        "f2l",
-        "oll",
-        "pll",
-    ]
+    assert result["stages"][0]["stage"] == "xcross"
+    assert result["stages"][-2]["stage"] == "oll"
+    assert result["stages"][-1]["stage"] == "pll"
+    pairs = [pair for stage in result["stages"] for pair in stage.get("f2l_pairs", [])]
+    assert len(pairs) == len(set(pairs)) == 4
+    assert all("moves" in event for event in result["trace"] if event["kind"] != "phase_start")
     assert cfop.verify_solution(cube.state, result["solution"])
 
     records = cfop.generate(
