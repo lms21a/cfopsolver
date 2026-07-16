@@ -1,5 +1,7 @@
 //! Traceable and batch-friendly Rubik's Cube solving.
 
+mod engine;
+
 pub mod algorithm;
 pub mod cube;
 pub mod error;

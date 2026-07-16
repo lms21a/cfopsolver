@@ -2,17 +2,17 @@ use std::{fmt, str::FromStr};
 
 use std::collections::{HashSet, VecDeque};
 
-use rcuber::{
-    cubie::{Corner, CubieCube, Edge},
-    facelet::{
-        Color, FaceCube, CENTER_FACELET, CORNER_COLOR, CORNER_FACELET, EDGE_COLOR, EDGE_FACELET,
-    },
-    moves::Move as EngineMove,
-};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{
     algorithm::{Algorithm, Move},
+    engine::{
+        cubie::{Corner, CubieCube, Edge, SOLVED_CUBIE_CUBE},
+        facelet::{
+            Color, FaceCube, CENTER_FACELET, CORNER_COLOR, CORNER_FACELET, EDGE_COLOR, EDGE_FACELET,
+        },
+        moves::Move as EngineMove,
+    },
     error::{Error, Result},
 };
 
@@ -33,7 +33,7 @@ impl Default for Cube {
 impl Cube {
     pub const fn solved() -> Self {
         Self {
-            inner: rcuber::cubie::SOLVED_CUBIE_CUBE,
+            inner: SOLVED_CUBIE_CUBE,
         }
     }
 
@@ -69,11 +69,11 @@ impl Cube {
     }
 
     pub fn is_canonically_solved(&self) -> bool {
-        self.inner == rcuber::cubie::SOLVED_CUBIE_CUBE
+        self.inner == SOLVED_CUBIE_CUBE
     }
 
     pub fn has_canonical_orientation(&self) -> bool {
-        self.inner.center == rcuber::cubie::SOLVED_CUBIE_CUBE.center
+        self.inner.center == SOLVED_CUBIE_CUBE.center
     }
 
     /// Return a physically equivalent orientation with canonical URFDLB centres,

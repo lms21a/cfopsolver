@@ -1,9 +1,11 @@
 use std::{fmt, str::FromStr};
 
-use rcuber::moves::Move as EngineMove;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::error::{Error, Result};
+use crate::{
+    engine::moves::Move as EngineMove,
+    error::{Error, Result},
+};
 
 /// A validated cube move. Display uses standard Singmaster notation.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

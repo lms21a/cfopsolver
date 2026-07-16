@@ -261,6 +261,12 @@ scramble, and each profile's JSONL output was byte-identical across the three ru
 Treat these as a local snapshot; hardware, selected cross mode, trace output, and
 probe limits materially affect throughput.
 
+The v0.3.2 private-engine extraction reproduced all four v0.3.1 JSONL files
+byte-for-byte. Three default-feature release runs measured median times of 0.72 s,
+1.86 s, 2.25 s, and 2.54 s respectively, keeping throughput within normal local
+variance while removing the patched path dependency. A separate 1,000-record direct
+two-phase corpus and a repeated-alternative corpus also matched v0.3.1 byte-for-byte.
+
 ## Development
 
 ```bash
@@ -279,5 +285,6 @@ cargo check --features python
 `uv.lock` controls Python build and development dependencies; `Cargo.lock` controls
 Rust dependencies. The checkout currently targets Rust 1.70, publishes an abi3 wheel
 for Python 3.8+, and uses Python 3.12 for local development via `.python-version`.
-The pinned `rcuber` source is vendored for one pair-boundary performance extension;
-see `vendor/rcuber/PATCHES.md`.
+The private cube engine retains the required MIT-licensed portions of `rcuber` 0.7.20
+inside `src/engine/`, including the pair-boundary performance extension. Unused solver
+families and packaging code are excluded; see `THIRD_PARTY_NOTICES.md` for attribution.

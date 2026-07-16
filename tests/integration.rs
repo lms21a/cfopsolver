@@ -5,25 +5,241 @@ use cfop_solver::{
 };
 
 #[test]
-fn every_supported_move_round_trips_with_its_inverse() {
-    let bases = [
-        "U", "R", "F", "D", "L", "B", "M", "E", "S", "Uw", "Rw", "Fw", "Dw", "Lw", "Bw", "x", "y",
-        "z",
+fn every_supported_move_matches_golden_and_round_trips() {
+    let goldens = [
+        (
+            "U",
+            "UUUUUUUUUBBBRRRRRRRRRFFFFFFDDDDDDDDDFFFLLLLLLLLLBBBBBB",
+        ),
+        (
+            "U2",
+            "UUUUUUUUULLLRRRRRRBBBFFFFFFDDDDDDDDDRRRLLLLLLFFFBBBBBB",
+        ),
+        (
+            "U'",
+            "UUUUUUUUUFFFRRRRRRLLLFFFFFFDDDDDDDDDBBBLLLLLLRRRBBBBBB",
+        ),
+        (
+            "R",
+            "UUFUUFUUFRRRRRRRRRFFDFFDFFDDDBDDBDDBLLLLLLLLLUBBUBBUBB",
+        ),
+        (
+            "R2",
+            "UUDUUDUUDRRRRRRRRRFFBFFBFFBDDUDDUDDULLLLLLLLLFBBFBBFBB",
+        ),
+        (
+            "R'",
+            "UUBUUBUUBRRRRRRRRRFFUFFUFFUDDFDDFDDFLLLLLLLLLDBBDBBDBB",
+        ),
+        (
+            "F",
+            "UUUUUULLLURRURRURRFFFFFFFFFRRRDDDDDDLLDLLDLLDBBBBBBBBB",
+        ),
+        (
+            "F2",
+            "UUUUUUDDDLRRLRRLRRFFFFFFFFFUUUDDDDDDLLRLLRLLRBBBBBBBBB",
+        ),
+        (
+            "F'",
+            "UUUUUURRRDRRDRRDRRFFFFFFFFFLLLDDDDDDLLULLULLUBBBBBBBBB",
+        ),
+        (
+            "D",
+            "UUUUUUUUURRRRRRFFFFFFFFFLLLDDDDDDDDDLLLLLLBBBBBBBBBRRR",
+        ),
+        (
+            "D2",
+            "UUUUUUUUURRRRRRLLLFFFFFFBBBDDDDDDDDDLLLLLLRRRBBBBBBFFF",
+        ),
+        (
+            "D'",
+            "UUUUUUUUURRRRRRBBBFFFFFFRRRDDDDDDDDDLLLLLLFFFBBBBBBLLL",
+        ),
+        (
+            "L",
+            "BUUBUUBUURRRRRRRRRUFFUFFUFFFDDFDDFDDLLLLLLLLLBBDBBDBBD",
+        ),
+        (
+            "L2",
+            "DUUDUUDUURRRRRRRRRBFFBFFBFFUDDUDDUDDLLLLLLLLLBBFBBFBBF",
+        ),
+        (
+            "L'",
+            "FUUFUUFUURRRRRRRRRDFFDFFDFFBDDBDDBDDLLLLLLLLLBBUBBUBBU",
+        ),
+        (
+            "B",
+            "RRRUUUUUURRDRRDRRDFFFFFFFFFDDDDDDLLLULLULLULLBBBBBBBBB",
+        ),
+        (
+            "B2",
+            "DDDUUUUUURRLRRLRRLFFFFFFFFFDDDDDDUUURLLRLLRLLBBBBBBBBB",
+        ),
+        (
+            "B'",
+            "LLLUUUUUURRURRURRUFFFFFFFFFDDDDDDRRRDLLDLLDLLBBBBBBBBB",
+        ),
+        (
+            "M",
+            "UBUUBUUBURRRRRRRRRFUFFUFFUFDFDDFDDFDLLLLLLLLLBDBBDBBDB",
+        ),
+        (
+            "M2",
+            "UDUUDUUDURRRRRRRRRFBFFBFFBFDUDDUDDUDLLLLLLLLLBFBBFBBFB",
+        ),
+        (
+            "M'",
+            "UFUUFUUFURRRRRRRRRFDFFDFFDFDBDDBDDBDLLLLLLLLLBUBBUBBUB",
+        ),
+        (
+            "E",
+            "UUUUUUUUURRRFFFRRRFFFLLLFFFDDDDDDDDDLLLBBBLLLBBBRRRBBB",
+        ),
+        (
+            "E2",
+            "UUUUUUUUURRRLLLRRRFFFBBBFFFDDDDDDDDDLLLRRRLLLBBBFFFBBB",
+        ),
+        (
+            "E'",
+            "UUUUUUUUURRRBBBRRRFFFRRRFFFDDDDDDDDDLLLFFFLLLBBBLLLBBB",
+        ),
+        (
+            "S",
+            "UUULLLUUURURRURRURFFFFFFFFFDDDRRRDDDLDLLDLLDLBBBBBBBBB",
+        ),
+        (
+            "S2",
+            "UUUDDDUUURLRRLRRLRFFFFFFFFFDDDUUUDDDLRLLRLLRLBBBBBBBBB",
+        ),
+        (
+            "S'",
+            "UUURRRUUURDRRDRRDRFFFFFFFFFDDDLLLDDDLULLULLULBBBBBBBBB",
+        ),
+        (
+            "Uw",
+            "UUUUUUUUUBBBBBBRRRRRRRRRFFFDDDDDDDDDFFFFFFLLLLLLLLLBBB",
+        ),
+        (
+            "Uw2",
+            "UUUUUUUUULLLLLLRRRBBBBBBFFFDDDDDDDDDRRRRRRLLLFFFFFFBBB",
+        ),
+        (
+            "Uw'",
+            "UUUUUUUUUFFFFFFRRRLLLLLLFFFDDDDDDDDDBBBBBBLLLRRRRRRBBB",
+        ),
+        (
+            "Rw",
+            "UFFUFFUFFRRRRRRRRRFDDFDDFDDDBBDBBDBBLLLLLLLLLUUBUUBUUB",
+        ),
+        (
+            "Rw2",
+            "UDDUDDUDDRRRRRRRRRFBBFBBFBBDUUDUUDUULLLLLLLLLFFBFFBFFB",
+        ),
+        (
+            "Rw'",
+            "UBBUBBUBBRRRRRRRRRFUUFUUFUUDFFDFFDFFLLLLLLLLLDDBDDBDDB",
+        ),
+        (
+            "Fw",
+            "UUULLLLLLUURUURUURFFFFFFFFFRRRRRRDDDLDDLDDLDDBBBBBBBBB",
+        ),
+        (
+            "Fw2",
+            "UUUDDDDDDLLRLLRLLRFFFFFFFFFUUUUUUDDDLRRLRRLRRBBBBBBBBB",
+        ),
+        (
+            "Fw'",
+            "UUURRRRRRDDRDDRDDRFFFFFFFFFLLLLLLDDDLUULUULUUBBBBBBBBB",
+        ),
+        (
+            "Dw",
+            "UUUUUUUUURRRFFFFFFFFFLLLLLLDDDDDDDDDLLLBBBBBBBBBRRRRRR",
+        ),
+        (
+            "Dw2",
+            "UUUUUUUUURRRLLLLLLFFFBBBBBBDDDDDDDDDLLLRRRRRRBBBFFFFFF",
+        ),
+        (
+            "Dw'",
+            "UUUUUUUUURRRBBBBBBFFFRRRRRRDDDDDDDDDLLLFFFFFFBBBLLLLLL",
+        ),
+        (
+            "Lw",
+            "BBUBBUBBURRRRRRRRRUUFUUFUUFFFDFFDFFDLLLLLLLLLBDDBDDBDD",
+        ),
+        (
+            "Lw2",
+            "DDUDDUDDURRRRRRRRRBBFBBFBBFUUDUUDUUDLLLLLLLLLBFFBFFBFF",
+        ),
+        (
+            "Lw'",
+            "FFUFFUFFURRRRRRRRRDDFDDFDDFBBDBBDBBDLLLLLLLLLBUUBUUBUU",
+        ),
+        (
+            "Bw",
+            "RRRRRRUUURDDRDDRDDFFFFFFFFFDDDLLLLLLUULUULUULBBBBBBBBB",
+        ),
+        (
+            "Bw2",
+            "DDDDDDUUURLLRLLRLLFFFFFFFFFDDDUUUUUURRLRRLRRLBBBBBBBBB",
+        ),
+        (
+            "Bw'",
+            "LLLLLLUUURUURUURUUFFFFFFFFFDDDRRRRRRDDLDDLDDLBBBBBBBBB",
+        ),
+        (
+            "x",
+            "FFFFFFFFFRRRRRRRRRDDDDDDDDDBBBBBBBBBLLLLLLLLLUUUUUUUUU",
+        ),
+        (
+            "x2",
+            "DDDDDDDDDRRRRRRRRRBBBBBBBBBUUUUUUUUULLLLLLLLLFFFFFFFFF",
+        ),
+        (
+            "x'",
+            "BBBBBBBBBRRRRRRRRRUUUUUUUUUFFFFFFFFFLLLLLLLLLDDDDDDDDD",
+        ),
+        (
+            "y",
+            "UUUUUUUUUBBBBBBBBBRRRRRRRRRDDDDDDDDDFFFFFFFFFLLLLLLLLL",
+        ),
+        (
+            "y2",
+            "UUUUUUUUULLLLLLLLLBBBBBBBBBDDDDDDDDDRRRRRRRRRFFFFFFFFF",
+        ),
+        (
+            "y'",
+            "UUUUUUUUUFFFFFFFFFLLLLLLLLLDDDDDDDDDBBBBBBBBBRRRRRRRRR",
+        ),
+        (
+            "z",
+            "LLLLLLLLLUUUUUUUUUFFFFFFFFFRRRRRRRRRDDDDDDDDDBBBBBBBBB",
+        ),
+        (
+            "z2",
+            "DDDDDDDDDLLLLLLLLLFFFFFFFFFUUUUUUUUURRRRRRRRRBBBBBBBBB",
+        ),
+        (
+            "z'",
+            "RRRRRRRRRDDDDDDDDDFFFFFFFFFLLLLLLLLLUUUUUUUUUBBBBBBBBB",
+        ),
     ];
-    for base in bases {
-        for suffix in ["", "2", "'"] {
-            let algorithm = format!("{base}{suffix}");
-            let parsed: cfop_solver::Algorithm = algorithm.parse().unwrap();
-            let moved = Cube::solved().after_algorithm(&parsed);
-            let restored = Cube::from_facelets(&moved.facelets()).unwrap();
-            assert_eq!(restored, moved, "serialization changed {algorithm}");
-            assert!(
-                moved
-                    .after_algorithm(&parsed.inverse())
-                    .is_canonically_solved(),
-                "inverse failed for {algorithm}"
-            );
-        }
+    for (algorithm, expected) in goldens {
+        let parsed: cfop_solver::Algorithm = algorithm.parse().unwrap();
+        let moved = Cube::solved().after_algorithm(&parsed);
+        assert_eq!(
+            moved.facelets(),
+            expected,
+            "move semantics changed {algorithm}"
+        );
+        let restored = Cube::from_facelets(&moved.facelets()).unwrap();
+        assert_eq!(restored, moved, "serialization changed {algorithm}");
+        assert!(
+            moved
+                .after_algorithm(&parsed.inverse())
+                .is_canonically_solved(),
+            "inverse failed for {algorithm}"
+        );
     }
 }
 

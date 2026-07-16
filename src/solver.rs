@@ -7,13 +7,17 @@ use std::{
     time::Instant,
 };
 
-use rcuber::solver::{
-    cfop::{CrossSolver, F2LSolver, OLLSolver, PLLSolver},
-    min2phase::solver::Solver as TwoPhaseSolver,
-};
 use serde::{Deserialize, Serialize};
 
-use crate::{Algorithm, Cube, Error, Move, Result};
+use crate::{
+    engine::{
+        cfop::{CrossSolver, F2LSolver, OLLSolver, PLLSolver},
+        cubie::SOLVED_CUBIE_CUBE,
+        min2phase::solver::Solver as TwoPhaseSolver,
+        moves::Move as EngineMove,
+    },
+    Algorithm, Cube, Error, Move, Result,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -918,7 +922,7 @@ struct LastLayerEvaluator {
 
 impl Default for LastLayerEvaluator {
     fn default() -> Self {
-        let solved = rcuber::cubie::SOLVED_CUBIE_CUBE;
+        let solved = SOLVED_CUBIE_CUBE;
         Self {
             oll: OLLSolver::new(solved),
             pll: PLLSolver::new(solved),
@@ -1453,9 +1457,9 @@ fn cached_f2l_candidate(
 fn f2l_candidate(cube: Cube, auf: u8, full_estimate: bool) -> Result<Option<F2lCandidate>> {
     let prefix_move = match auf {
         0 => None,
-        1 => Move::from_engine(rcuber::moves::Move::U),
-        2 => Move::from_engine(rcuber::moves::Move::U2),
-        3 => Move::from_engine(rcuber::moves::Move::U3),
+        1 => Move::from_engine(EngineMove::U),
+        2 => Move::from_engine(EngineMove::U2),
+        3 => Move::from_engine(EngineMove::U3),
         _ => return Err(Error::Solver(format!("invalid F2L AUF index {auf}"))),
     };
     let adjusted = prefix_move.map_or(cube, |cube_move| cube.after_move(cube_move));
@@ -1502,7 +1506,7 @@ fn f2l_candidate(cube: Cube, auf: u8, full_estimate: bool) -> Result<Option<F2lC
 }
 
 fn f2l_pair_mask(cube: &Cube) -> u8 {
-    let solved = rcuber::cubie::SOLVED_CUBIE_CUBE;
+    let solved = SOLVED_CUBIE_CUBE;
     let mut mask = 0u8;
     for (bit, corner, edge) in [(0, 4, 8), (1, 5, 9), (2, 6, 10), (3, 7, 11)] {
         if cube.inner.cp[corner] == solved.cp[corner]
@@ -1689,7 +1693,7 @@ fn stage_is_solved(stage: Stage, cube: &Cube) -> bool {
             CrossSolver { cube: cube.inner }.is_solved() && f2l_pair_mask(cube).count_ones() >= 3
         }
         Stage::F2l => {
-            let solved = rcuber::cubie::SOLVED_CUBIE_CUBE;
+            let solved = SOLVED_CUBIE_CUBE;
             cube.inner.center == solved.center
                 && cube.inner.cp[4..8] == solved.cp[4..8]
                 && cube.inner.co[4..8] == solved.co[4..8]
@@ -1698,7 +1702,7 @@ fn stage_is_solved(stage: Stage, cube: &Cube) -> bool {
         }
         Stage::F2lPair => CrossSolver { cube: cube.inner }.is_solved() && f2l_pair_mask(cube) != 0,
         Stage::Oll => {
-            let solved = rcuber::cubie::SOLVED_CUBIE_CUBE;
+            let solved = SOLVED_CUBIE_CUBE;
             (0..4).all(|index| {
                 cube.inner.cp[0..4].contains(&solved.cp[index])
                     && cube.inner.co[index] == 0
@@ -1873,7 +1877,7 @@ fn append_stage_exploration(
 }
 
 fn stage_score(stage: Stage, cube: &Cube) -> u16 {
-    let solved = rcuber::cubie::SOLVED_CUBIE_CUBE;
+    let solved = SOLVED_CUBIE_CUBE;
     let cross = (4..8)
         .filter(|&index| cube.inner.ep[index] == solved.ep[index] && cube.inner.eo[index] == 0)
         .count();

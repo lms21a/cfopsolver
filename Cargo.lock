@@ -34,15 +34,15 @@ checksum = "fd16c4719339c4530435d38e511904438d07cce7950afa3718a84ac36c10e89e"
 
 [[package]]
 name = "cfop-solver"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "pyo3",
  "rand",
  "rand_chacha",
  "rayon",
- "rcuber",
  "serde",
  "serde_json",
+ "static_init",
  "tempfile",
  "thiserror",
 ]
@@ -344,15 +344,6 @@ checksum = "1465873a3dfdaa8ae7cb14b4383657caab0b3e8a0aa9ae8e04b044854c8dfce2"
 dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
-]
-
-[[package]]
-name = "rcuber"
-version = "0.7.20"
-dependencies = [
- "rand",
- "static_init",
- "thiserror",
 ]
 
 [[package]]
