@@ -1,0 +1,7 @@
+/target
+/.venv
+*.so
+*.pyd
+*.pyc
+__pycache__/
+*.jsonl
