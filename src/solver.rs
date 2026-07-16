@@ -120,6 +120,67 @@ impl FromStr for F2lStrategy {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Efficiency {
+    Fast,
+    Balanced,
+    Thorough,
+    Max,
+}
+
+impl Efficiency {
+    fn exact_budgets(self, configured_limit: u64) -> Vec<u64> {
+        let requested = match self {
+            Self::Fast => &[][..],
+            Self::Balanced => &[100_000][..],
+            Self::Thorough => &[100_000, 500_000][..],
+            Self::Max => &[100_000, 500_000, u64::MAX][..],
+        };
+        let mut budgets = Vec::with_capacity(requested.len());
+        for &budget in requested {
+            let budget = budget.min(configured_limit);
+            if budget > 0 && budgets.last().copied() != Some(budget) {
+                budgets.push(budget);
+            }
+        }
+        budgets
+    }
+}
+
+impl Default for Efficiency {
+    fn default() -> Self {
+        Self::Balanced
+    }
+}
+
+impl fmt::Display for Efficiency {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Fast => "fast",
+            Self::Balanced => "balanced",
+            Self::Thorough => "thorough",
+            Self::Max => "max",
+        })
+    }
+}
+
+impl FromStr for Efficiency {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "fast" | "speed" | "low" => Ok(Self::Fast),
+            "balanced" | "default" | "medium" => Ok(Self::Balanced),
+            "thorough" | "high" | "quality" => Ok(Self::Thorough),
+            "max" | "maximum" | "exhaustive" => Ok(Self::Max),
+            _ => Err(Error::Solver(format!(
+                "unknown efficiency profile {value:?}"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum F2lPair {
@@ -209,6 +270,7 @@ pub struct SolveConfig {
     pub method: SolveMethod,
     pub cross_mode: CrossMode,
     pub f2l_strategy: F2lStrategy,
+    pub efficiency: Efficiency,
     pub trace: bool,
     pub exploration: bool,
     pub max_exploration_states: usize,
@@ -224,6 +286,7 @@ impl Default for SolveConfig {
             method: SolveMethod::Cfop,
             cross_mode: CrossMode::Cross,
             f2l_strategy: F2lStrategy::Lookahead,
+            efficiency: Efficiency::Balanced,
             trace: false,
             exploration: false,
             max_exploration_states: 72,
@@ -304,12 +367,18 @@ pub struct ExplorationEvent {
     pub reason: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SolveStats {
     pub method: SolveMethod,
     pub elapsed_micros: u64,
     pub move_count: usize,
     pub exploration_states: usize,
+    #[serde(default)]
+    pub f2l_candidates_evaluated: usize,
+    #[serde(default)]
+    pub exact_target_searches: usize,
+    #[serde(default)]
+    pub last_layer_evaluations: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -328,6 +397,8 @@ pub struct SolveResult {
     pub cross_mode: CrossMode,
     #[serde(default)]
     pub f2l_strategy: F2lStrategy,
+    #[serde(default)]
+    pub efficiency: Efficiency,
     pub solution: Algorithm,
     pub verified: bool,
     pub stages: Vec<StageResult>,
@@ -371,6 +442,7 @@ impl Solver {
                 method: self.config.method,
                 cross_mode: self.config.cross_mode,
                 f2l_strategy: self.config.f2l_strategy,
+                efficiency: self.config.efficiency,
                 solution,
                 verified: true,
                 stages: Vec::new(),
@@ -382,6 +454,9 @@ impl Solver {
                     elapsed_micros: micros(started.elapsed().as_micros()),
                     move_count: 0,
                     exploration_states: 0,
+                    f2l_candidates_evaluated: 0,
+                    exact_target_searches: 0,
+                    last_layer_evaluations: 0,
                 },
             });
         }
@@ -492,46 +567,26 @@ impl Solver {
         let mut trace = Vec::new();
         let mut exploration = Vec::new();
         let mut complete = Vec::new();
+        let mut search_metrics = SearchMetrics::default();
 
         let cross_started = Instant::now();
         let (plain_cross_end, plain_cross, cross_repaired) = run_cfop_stage(Stage::Cross, cube)?;
         let required_pairs = self.config.cross_mode.included_pairs();
-        let mut advanced_end = plain_cross_end;
-        let mut cross_moves = plain_cross.moves().to_vec();
-
-        if (f2l_pair_mask(&advanced_end).count_ones() as usize) < required_pairs {
-            for step in plan_f2l_pairs_until(
-                advanced_end,
-                self.config.f2l_strategy,
-                self.config.max_depth,
-                self.config.probe_limit,
-                required_pairs,
-            )? {
-                cross_moves.extend(step.algorithm.moves().iter().copied());
-                advanced_end = step.end;
-                if f2l_pair_mask(&advanced_end).count_ones() as usize >= required_pairs {
-                    break;
-                }
-            }
-        }
-
-        let mut cross_algorithm = Algorithm::new(cross_moves).simplified();
-        let mut cross_optimized = false;
-        if required_pairs > 0 {
-            if let Ok(candidate) = fast_to(
-                &cube,
-                &advanced_end,
-                self.config.max_depth,
-                self.config.probe_limit,
-            ) {
-                if candidate.len() < cross_algorithm.len()
-                    && cube.after_algorithm(&candidate) == advanced_end
-                {
-                    cross_algorithm = candidate;
-                    cross_optimized = true;
-                }
-            }
-        }
+        let pair_plan = plan_f2l_pairs(
+            cube,
+            plain_cross_end,
+            &plain_cross,
+            required_pairs,
+            self.config.f2l_strategy,
+            self.config.efficiency,
+            self.config.max_depth,
+            self.config.probe_limit,
+            &mut search_metrics,
+        )?;
+        let advanced_end = pair_plan.cross_end;
+        let cross_algorithm = pair_plan.cross_algorithm;
+        let cross_optimized = pair_plan.cross_optimized;
+        let remaining_pair_steps = pair_plan.remaining_steps;
         let cross_pairs = f2l_pairs(f2l_pair_mask(&advanced_end));
         let cross_stage = self.config.cross_mode.stage();
         if !stage_is_solved(cross_stage, &advanced_end) {
@@ -542,17 +597,19 @@ impl Solver {
         }
         let cross_message = if cross_pairs.is_empty() {
             format!(
-                "selected a {}-move {} branch",
+                "selected a {}-move {} branch at {} efficiency",
                 cross_algorithm.len(),
-                self.config.cross_mode
+                self.config.cross_mode,
+                self.config.efficiency
             )
         } else {
             format!(
-                "selected a {}-move {} branch with {} solved F2L pair(s): {}",
+                "selected a {}-move {} branch with {} solved F2L pair(s): {} at {} efficiency",
                 cross_algorithm.len(),
                 self.config.cross_mode,
                 cross_pairs.len(),
-                format_pairs(&cross_pairs)
+                format_pairs(&cross_pairs),
+                self.config.efficiency
             )
         };
         record_phase(
@@ -573,19 +630,15 @@ impl Solver {
         complete.extend(cross_algorithm.moves().iter().copied());
         cube = advanced_end;
 
-        for step in plan_f2l_pairs(
-            cube,
-            self.config.f2l_strategy,
-            self.config.max_depth,
-            self.config.probe_limit,
-        )? {
+        for step in remaining_pair_steps {
             let solved_after = f2l_pair_mask(&step.end).count_ones();
             let message = format!(
-                "selected {} moves for F2L pair {}/4 ({}) using {}",
+                "selected {} moves for F2L pair {}/4 ({}) using {} at {} efficiency",
                 step.algorithm.len(),
                 solved_after,
                 format_pairs(&step.pairs),
-                self.config.f2l_strategy
+                self.config.f2l_strategy,
+                self.config.efficiency
             );
             record_phase(
                 &self.config,
@@ -645,6 +698,7 @@ impl Solver {
             method: SolveMethod::Cfop,
             cross_mode: self.config.cross_mode,
             f2l_strategy: self.config.f2l_strategy,
+            efficiency: self.config.efficiency,
             solution: Algorithm::new(complete).simplified(),
             verified: false,
             stages,
@@ -656,6 +710,9 @@ impl Solver {
                 elapsed_micros: 0,
                 move_count: 0,
                 exploration_states: 0,
+                f2l_candidates_evaluated: search_metrics.f2l_candidates_evaluated,
+                exact_target_searches: search_metrics.exact_target_searches,
+                last_layer_evaluations: search_metrics.last_layer_evaluations,
             },
         })
     }
@@ -700,6 +757,7 @@ impl Solver {
             method: SolveMethod::Fast,
             cross_mode: self.config.cross_mode,
             f2l_strategy: self.config.f2l_strategy,
+            efficiency: self.config.efficiency,
             solution: solution.clone(),
             verified: false,
             stages: vec![StageResult {
@@ -721,6 +779,9 @@ impl Solver {
                 elapsed_micros: 0,
                 move_count: 0,
                 exploration_states: 0,
+                f2l_candidates_evaluated: 0,
+                exact_target_searches: 0,
+                last_layer_evaluations: 0,
             },
         })
     }
@@ -743,6 +804,48 @@ struct F2lCandidate {
     pairs: Vec<F2lPair>,
     estimated_total: usize,
     repaired: bool,
+}
+
+#[derive(Debug, Default)]
+struct SearchMetrics {
+    f2l_candidates_evaluated: usize,
+    exact_target_searches: usize,
+    last_layer_evaluations: usize,
+}
+
+#[derive(Debug, Clone)]
+struct F2lPlanNode {
+    cube: Cube,
+    steps: Vec<F2lStep>,
+    move_count: usize,
+    priority: usize,
+    last_layer: Algorithm,
+}
+
+#[derive(Debug)]
+struct F2lPlan {
+    steps: Vec<F2lStep>,
+    last_layer: Algorithm,
+}
+
+#[derive(Debug)]
+struct F2lRoute {
+    cross_end: Cube,
+    cross_algorithm: Algorithm,
+    cross_optimized: bool,
+    remaining_steps: Vec<F2lStep>,
+    last_layer: Algorithm,
+}
+
+impl F2lRoute {
+    fn move_count(&self) -> usize {
+        let mut moves = self.cross_algorithm.moves().to_vec();
+        for step in &self.remaining_steps {
+            moves.extend(step.algorithm.moves().iter().copied());
+        }
+        moves.extend(self.last_layer.moves().iter().copied());
+        Algorithm::new(moves).simplified().len()
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -837,57 +940,311 @@ fn record_phase(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn plan_f2l_pairs(
-    cube: Cube,
+    cross_start: Cube,
+    plain_cross_end: Cube,
+    plain_cross: &Algorithm,
+    required_pairs: usize,
     strategy: F2lStrategy,
+    efficiency: Efficiency,
     max_depth: usize,
     probe_limit: u64,
-) -> Result<Vec<F2lStep>> {
-    plan_f2l_pairs_until(cube, strategy, max_depth, probe_limit, 4)
+    metrics: &mut SearchMetrics,
+) -> Result<F2lRoute> {
+    plan_f2l_pairs_until(
+        cross_start,
+        plain_cross_end,
+        plain_cross,
+        required_pairs,
+        strategy,
+        efficiency,
+        max_depth,
+        probe_limit,
+        4,
+        metrics,
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn plan_f2l_pairs_until(
-    mut cube: Cube,
+    cross_start: Cube,
+    cube: Cube,
+    plain_cross: &Algorithm,
+    required_pairs: usize,
     strategy: F2lStrategy,
+    efficiency: Efficiency,
     max_depth: usize,
     probe_limit: u64,
     target_pair_count: usize,
-) -> Result<Vec<F2lStep>> {
-    let mut steps = Vec::with_capacity(4);
-    while (f2l_pair_mask(&cube).count_ones() as usize) < target_pair_count {
-        let step = choose_f2l_step(cube, strategy, max_depth, probe_limit)?;
-        let before = f2l_pair_mask(&cube);
-        let after = f2l_pair_mask(&step.end);
-        if after & before != before || after.count_ones() <= before.count_ones() {
-            return Err(Error::Solver(
-                "F2L pair planner failed to make cumulative progress".into(),
-            ));
+    metrics: &mut SearchMetrics,
+) -> Result<F2lRoute> {
+    let started = Instant::now();
+    let mut variants = vec![(false, 1usize)];
+    if strategy == F2lStrategy::Lookahead && efficiency != Efficiency::Fast {
+        variants.push((true, 1));
+        if matches!(efficiency, Efficiency::Thorough | Efficiency::Max) {
+            variants.push((true, 4));
         }
-        cube = step.end;
-        steps.push(step);
-        if steps.len() > 4 {
-            return Err(Error::Solver(
-                "F2L pair planner exceeded four insertion phases".into(),
-            ));
+        if efficiency == Efficiency::Max {
+            variants.push((true, 64));
         }
     }
-    Ok(steps)
+
+    let mut plans = Vec::with_capacity(variants.len());
+    let mut first_error = None;
+    for (all_aufs, beam_width) in variants {
+        match beam_f2l_plan(
+            cube,
+            strategy,
+            all_aufs,
+            beam_width,
+            target_pair_count,
+            metrics,
+        ) {
+            Ok(plan) => plans.push(plan),
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+    let exact_budgets = efficiency.exact_budgets(probe_limit);
+    for plan in &mut plans {
+        let mut step_start = cube;
+        for step in &mut plan.steps {
+            if step.algorithm.len() > 1 {
+                for &budget in &exact_budgets {
+                    metrics.exact_target_searches += 1;
+                    if let Ok(candidate) = fast_to(&step_start, &step.end, max_depth, budget) {
+                        if candidate.len() < step.algorithm.len()
+                            && step_start.after_algorithm(&candidate) == step.end
+                        {
+                            step.algorithm = candidate;
+                            step.optimized = true;
+                        }
+                    }
+                }
+            }
+            step_start = step.end;
+        }
+    }
+
+    let mut routes = Vec::with_capacity(plans.len());
+    for plan in plans {
+        routes.push(build_f2l_route(
+            cross_start,
+            cube,
+            plain_cross,
+            required_pairs,
+            plan,
+            max_depth,
+            &exact_budgets,
+            metrics,
+        ));
+    }
+    let mut selected = routes
+        .into_iter()
+        .min_by_key(F2lRoute::move_count)
+        .ok_or_else(|| {
+            first_error.unwrap_or_else(|| {
+                Error::Solver("F2L planner produced no complete pair route".into())
+            })
+        })?;
+
+    let planning_micros = micros(started.elapsed().as_micros());
+    let timing_share = planning_micros / selected.remaining_steps.len().max(1) as u64;
+    for step in &mut selected.remaining_steps {
+        step.elapsed_micros = timing_share;
+    }
+    Ok(selected)
 }
 
-fn choose_f2l_step(
+#[allow(clippy::too_many_arguments)]
+fn build_f2l_route(
+    cross_start: Cube,
+    plain_cross_end: Cube,
+    plain_cross: &Algorithm,
+    required_pairs: usize,
+    mut plan: F2lPlan,
+    max_depth: usize,
+    exact_budgets: &[u64],
+    metrics: &mut SearchMetrics,
+) -> F2lRoute {
+    let mut cross_end = plain_cross_end;
+    let mut split_index = 0;
+    while split_index < plan.steps.len()
+        && (f2l_pair_mask(&cross_end).count_ones() as usize) < required_pairs
+    {
+        cross_end = plan.steps[split_index].end;
+        split_index += 1;
+    }
+
+    let mut cross_moves = plain_cross.moves().to_vec();
+    for step in &plan.steps[..split_index] {
+        cross_moves.extend(step.algorithm.moves().iter().copied());
+    }
+    let mut cross_algorithm = Algorithm::new(cross_moves).simplified();
+    let mut cross_optimized = false;
+    if required_pairs > 0 {
+        for &budget in exact_budgets {
+            metrics.exact_target_searches += 1;
+            if let Ok(candidate) = fast_to(&cross_start, &cross_end, max_depth, budget) {
+                if candidate.len() < cross_algorithm.len()
+                    && cross_start.after_algorithm(&candidate) == cross_end
+                {
+                    cross_algorithm = candidate;
+                    cross_optimized = true;
+                }
+            }
+        }
+    }
+
+    let remaining_steps = plan.steps.split_off(split_index);
+    F2lRoute {
+        cross_end,
+        cross_algorithm,
+        cross_optimized,
+        remaining_steps,
+        last_layer: plan.last_layer,
+    }
+}
+
+fn beam_f2l_plan(
     cube: Cube,
     strategy: F2lStrategy,
-    max_depth: usize,
-    probe_limit: u64,
-) -> Result<F2lStep> {
-    let started = Instant::now();
-    let prefixes: &[&str] = match strategy {
-        F2lStrategy::Standard => &[""],
-        F2lStrategy::Lookahead => &["", "U", "U2", "U'"],
+    all_aufs: bool,
+    beam_width: usize,
+    target_pair_count: usize,
+    metrics: &mut SearchMetrics,
+) -> Result<F2lPlan> {
+    if f2l_pair_mask(&cube).count_ones() as usize >= target_pair_count {
+        let last_layer = if target_pair_count == 4 {
+            metrics.last_layer_evaluations += 1;
+            last_layer_algorithm(cube)?
+        } else {
+            Algorithm::default()
+        };
+        return Ok(F2lPlan {
+            steps: Vec::new(),
+            last_layer,
+        });
+    }
+
+    let mut frontier = vec![F2lPlanNode {
+        cube,
+        steps: Vec::new(),
+        move_count: 0,
+        priority: 0,
+        last_layer: Algorithm::default(),
+    }];
+    let mut complete = Vec::new();
+    let mut first_error = None;
+
+    for _ in 0..4 {
+        let mut next = Vec::new();
+        for node in frontier {
+            match f2l_candidates(node.cube, strategy, all_aufs, metrics) {
+                Ok(candidates) => {
+                    for candidate in candidates {
+                        let before = f2l_pair_mask(&node.cube);
+                        let after = f2l_pair_mask(&candidate.end);
+                        if after & before != before || after.count_ones() <= before.count_ones() {
+                            continue;
+                        }
+                        let step = F2lStep {
+                            end: candidate.end,
+                            algorithm: candidate.algorithm,
+                            pairs: candidate.pairs,
+                            elapsed_micros: 0,
+                            repaired: candidate.repaired,
+                            optimized: false,
+                        };
+                        let move_count = node.move_count + step.algorithm.len();
+                        let mut steps = node.steps.clone();
+                        steps.push(step);
+                        let expanded = F2lPlanNode {
+                            cube: candidate.end,
+                            steps,
+                            move_count,
+                            priority: node.move_count + candidate.estimated_total,
+                            last_layer: Algorithm::default(),
+                        };
+                        if after.count_ones() as usize >= target_pair_count {
+                            let mut expanded = expanded;
+                            if target_pair_count == 4 {
+                                metrics.last_layer_evaluations += 1;
+                                match last_layer_algorithm(expanded.cube) {
+                                    Ok(algorithm) => expanded.last_layer = algorithm,
+                                    Err(error) => {
+                                        if first_error.is_none() {
+                                            first_error = Some(error);
+                                        }
+                                        continue;
+                                    }
+                                }
+                            }
+                            complete.push(expanded);
+                        } else {
+                            next.push(expanded);
+                        }
+                    }
+                }
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        next.sort_by_key(|node| (node.priority, node.move_count));
+        let mut states = HashSet::new();
+        next.retain(|node| states.insert(node.cube.facelets()));
+        next.truncate(beam_width);
+        frontier = next;
+    }
+
+    complete
+        .into_iter()
+        .min_by_key(|node| (node.move_count + node.last_layer.len(), node.move_count))
+        .map(|node| F2lPlan {
+            steps: node.steps,
+            last_layer: node.last_layer,
+        })
+        .ok_or_else(|| {
+            first_error.unwrap_or_else(|| {
+                Error::Solver("F2L beam search did not reach the requested pair count".into())
+            })
+        })
+}
+
+fn last_layer_algorithm(cube: Cube) -> Result<Algorithm> {
+    let (after_oll, oll, _) = run_cfop_stage(Stage::Oll, cube)?;
+    let (_, pll, _) = run_cfop_stage(Stage::Pll, after_oll)?;
+    let mut moves = oll.moves().to_vec();
+    moves.extend(pll.moves().iter().copied());
+    Ok(Algorithm::new(moves).simplified())
+}
+
+fn f2l_candidates(
+    cube: Cube,
+    strategy: F2lStrategy,
+    all_aufs: bool,
+    metrics: &mut SearchMetrics,
+) -> Result<Vec<F2lCandidate>> {
+    let prefixes: &[&str] = if strategy == F2lStrategy::Lookahead && all_aufs {
+        &["", "U", "U2", "U'"]
+    } else {
+        &[""]
     };
     let mut candidates = Vec::with_capacity(prefixes.len());
     let mut first_error = None;
     for notation in prefixes {
+        metrics.f2l_candidates_evaluated += 1;
         match f2l_candidate(cube, notation) {
             Ok(Some(candidate)) => candidates.push(candidate),
             Ok(None) => {}
@@ -898,35 +1255,16 @@ fn choose_f2l_step(
             }
         }
     }
-    let mut selected = candidates
-        .into_iter()
-        .min_by_key(|candidate| (candidate.estimated_total, candidate.algorithm.len()))
-        .ok_or_else(|| {
-            first_error.unwrap_or_else(|| {
-                Error::Solver("F2L engine produced no cumulative pair transition".into())
-            })
-        })?;
-
-    let mut optimized = false;
-    if strategy == F2lStrategy::Lookahead && selected.algorithm.len() > 1 {
-        if let Ok(candidate) = fast_to(&cube, &selected.end, max_depth, probe_limit.min(100_000)) {
-            if candidate.len() < selected.algorithm.len()
-                && cube.after_algorithm(&candidate) == selected.end
-            {
-                selected.algorithm = candidate;
-                optimized = true;
-            }
-        }
+    candidates.sort_by_key(|candidate| (candidate.estimated_total, candidate.algorithm.len()));
+    let mut states = HashSet::new();
+    candidates.retain(|candidate| states.insert(candidate.end.facelets()));
+    if candidates.is_empty() {
+        Err(first_error.unwrap_or_else(|| {
+            Error::Solver("F2L engine produced no cumulative pair transition".into())
+        }))
+    } else {
+        Ok(candidates)
     }
-
-    Ok(F2lStep {
-        end: selected.end,
-        algorithm: selected.algorithm,
-        pairs: selected.pairs,
-        elapsed_micros: micros(started.elapsed().as_micros()),
-        repaired: selected.repaired,
-        optimized,
-    })
 }
 
 fn f2l_candidate(cube: Cube, prefix_notation: &str) -> Result<Option<F2lCandidate>> {

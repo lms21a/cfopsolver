@@ -10,11 +10,11 @@ use rayon::{prelude::*, ThreadPoolBuilder};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Algorithm, CrossMode, Cube, Error, ExplorationEvent, F2lStrategy, Result, SolveConfig,
-    SolveMethod, Solver, StageResult, TraceEvent,
+    Algorithm, CrossMode, Cube, Efficiency, Error, ExplorationEvent, F2lStrategy, Result,
+    SolveConfig, SolveMethod, SolveStats, Solver, StageResult, TraceEvent,
 };
 
-pub const DATASET_SCHEMA: &str = "cfop-dataset/v2";
+pub const DATASET_SCHEMA: &str = "cfop-dataset/v3";
 pub const STATE_FORMAT: &str = "facelets-urfdlb-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +53,9 @@ pub struct GenerateConfig {
     pub method: SolveMethod,
     pub cross_mode: CrossMode,
     pub f2l_strategy: F2lStrategy,
+    pub efficiency: Efficiency,
+    pub max_depth: usize,
+    pub probe_limit: u64,
     pub trace: bool,
     pub exploration: bool,
     pub max_exploration_states: usize,
@@ -71,6 +74,9 @@ impl Default for GenerateConfig {
             method: SolveMethod::Fast,
             cross_mode: CrossMode::Cross,
             f2l_strategy: F2lStrategy::Lookahead,
+            efficiency: Efficiency::Balanced,
+            max_depth: 30,
+            probe_limit: 1_000_000,
             trace: false,
             exploration: false,
             max_exploration_states: 72,
@@ -87,9 +93,12 @@ pub struct GeneratedSolution {
     pub cross_mode: CrossMode,
     #[serde(default)]
     pub f2l_strategy: F2lStrategy,
+    #[serde(default)]
+    pub efficiency: Efficiency,
     pub moves: Algorithm,
     pub move_count: usize,
     pub verified: bool,
+    pub stats: SolveStats,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stages: Vec<StageResult>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -206,14 +215,16 @@ fn generate_one(config: &GenerateConfig, index: usize) -> Result<GeneratedSample
         method: config.method,
         cross_mode: config.cross_mode,
         f2l_strategy: config.f2l_strategy,
+        efficiency: config.efficiency,
         trace: config.trace,
         exploration: config.exploration,
         max_exploration_states: config.max_exploration_states,
+        max_depth: config.max_depth,
+        probe_limit: config.probe_limit,
         // A generated record already has a second genuine solution available:
         // the inverse of its known scramble. Reserve the much more expensive
         // continuation search for requests beyond those two solutions.
         alternatives: config.solutions_per_scramble.saturating_sub(2),
-        ..SolveConfig::default()
     };
     let result = Solver::new(solve_config).solve(&cube)?;
     let mut solutions = Vec::with_capacity(config.solutions_per_scramble);
@@ -223,14 +234,18 @@ fn generate_one(config: &GenerateConfig, index: usize) -> Result<GeneratedSample
     for stage in &mut primary_stages {
         stage.elapsed_micros = 0;
     }
+    let mut primary_stats = result.stats.clone();
+    primary_stats.elapsed_micros = 0;
     solutions.push(GeneratedSolution {
         source: "solver_primary".into(),
         method: config.method,
         cross_mode: config.cross_mode,
         f2l_strategy: config.f2l_strategy,
+        efficiency: config.efficiency,
         moves: result.solution.clone(),
         move_count: result.solution.len(),
         verified: result.verified,
+        stats: primary_stats,
         stages: primary_stages,
         trace: result.trace,
         exploration: result.exploration,
@@ -245,8 +260,10 @@ fn generate_one(config: &GenerateConfig, index: usize) -> Result<GeneratedSample
                 method: SolveMethod::Fast,
                 cross_mode: config.cross_mode,
                 f2l_strategy: config.f2l_strategy,
+                efficiency: config.efficiency,
                 move_count: inverse.len(),
                 verified: cube.after_algorithm(&inverse).is_solved(),
+                stats: generated_stats(SolveMethod::Fast, inverse.len()),
                 moves: inverse,
                 stages: Vec::new(),
                 trace: Vec::new(),
@@ -262,8 +279,10 @@ fn generate_one(config: &GenerateConfig, index: usize) -> Result<GeneratedSample
                 method: SolveMethod::Fast,
                 cross_mode: config.cross_mode,
                 f2l_strategy: config.f2l_strategy,
+                efficiency: config.efficiency,
                 move_count: alternative.move_count,
                 verified: alternative.verified,
+                stats: generated_stats(SolveMethod::Fast, alternative.move_count),
                 moves: alternative.algorithm,
                 stages: Vec::new(),
                 trace: Vec::new(),
@@ -336,8 +355,10 @@ fn add_verified_identity_variants(
                 method: solutions[0].method,
                 cross_mode: solutions[0].cross_mode,
                 f2l_strategy: solutions[0].f2l_strategy,
+                efficiency: solutions[0].efficiency,
                 move_count: variant.len(),
                 verified: cube.after_algorithm(&variant).is_solved(),
+                stats: generated_stats(solutions[0].method, variant.len()),
                 moves: variant,
                 stages: Vec::new(),
                 trace: Vec::new(),
@@ -354,6 +375,14 @@ fn push_unique_solution(target: &mut Vec<GeneratedSolution>, candidate: Generate
             .any(|existing| existing.moves.to_string() == candidate.moves.to_string())
     {
         target.push(candidate);
+    }
+}
+
+fn generated_stats(method: SolveMethod, move_count: usize) -> SolveStats {
+    SolveStats {
+        method,
+        move_count,
+        ..SolveStats::default()
     }
 }
 
@@ -437,6 +466,9 @@ mod tests {
                 record.schema == DATASET_SCHEMA
                     && record.solutions[0].verified
                     && record.solutions[0].cross_mode == cross_mode
+                    && record.solutions[0].efficiency == Efficiency::Balanced
+                    && record.solutions[0].stats.elapsed_micros == 0
+                    && record.solutions[0].stats.f2l_candidates_evaluated > 0
             }));
         }
     }

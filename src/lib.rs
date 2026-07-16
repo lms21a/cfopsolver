@@ -16,6 +16,6 @@ pub use generator::{
     generate_dataset, generate_to_jsonl, write_jsonl, Difficulty, GenerateConfig, GeneratedSample,
 };
 pub use solver::{
-    AlternativeSolution, CrossMode, ExplorationEvent, F2lPair, F2lStrategy, SolveConfig,
-    SolveMethod, SolveResult, Solver, Stage, StageResult, TraceEvent,
+    AlternativeSolution, CrossMode, Efficiency, ExplorationEvent, F2lPair, F2lStrategy,
+    SolveConfig, SolveMethod, SolveResult, SolveStats, Solver, Stage, StageResult, TraceEvent,
 };

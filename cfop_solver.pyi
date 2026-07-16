@@ -32,6 +32,7 @@ class Solver:
         probe_limit: int = 1_000_000,
         cross: str = "cross",
         f2l: str = "lookahead",
+        efficiency: str = "balanced",
     ) -> None: ...
     def solve(self, cube: Cube) -> dict[str, Any]: ...
     def solve_state(self, state: str) -> dict[str, Any]: ...
@@ -51,6 +52,9 @@ def generate(
     exploration: bool = False,
     cross: str = "cross",
     f2l: str = "lookahead",
+    efficiency: str = "balanced",
+    max_depth: int = 30,
+    probe_limit: int = 1_000_000,
 ) -> list[dict[str, Any]]: ...
 def generate_jsonl(
     path: str | PathLike[str],
@@ -66,4 +70,7 @@ def generate_jsonl(
     exploration: bool = False,
     cross: str = "cross",
     f2l: str = "lookahead",
+    efficiency: str = "balanced",
+    max_depth: int = 30,
+    probe_limit: int = 1_000_000,
 ) -> None: ...

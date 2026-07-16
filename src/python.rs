@@ -7,8 +7,8 @@ use pyo3::{
 };
 
 use crate::{
-    generate_dataset, generate_to_jsonl, CrossMode, Cube, Difficulty, Error, F2lStrategy,
-    GenerateConfig, SolveConfig, SolveMethod, Solver,
+    generate_dataset, generate_to_jsonl, CrossMode, Cube, Difficulty, Efficiency, Error,
+    F2lStrategy, GenerateConfig, SolveConfig, SolveMethod, Solver,
 };
 
 fn python_error(error: Error) -> PyErr {
@@ -106,7 +106,7 @@ struct PySolver {
 #[pymethods]
 impl PySolver {
     #[new]
-    #[pyo3(signature = (method="cfop", trace=false, exploration=false, max_exploration_states=72, alternatives=0, max_depth=30, probe_limit=1_000_000, cross="cross", f2l="lookahead"))]
+    #[pyo3(signature = (method="cfop", trace=false, exploration=false, max_exploration_states=72, alternatives=0, max_depth=30, probe_limit=1_000_000, cross="cross", f2l="lookahead", efficiency="balanced"))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         method: &str,
@@ -118,15 +118,18 @@ impl PySolver {
         probe_limit: u64,
         cross: &str,
         f2l: &str,
+        efficiency: &str,
     ) -> PyResult<Self> {
         let method = method.parse().map_err(python_error)?;
         let cross_mode: CrossMode = cross.parse().map_err(python_error)?;
         let f2l_strategy: F2lStrategy = f2l.parse().map_err(python_error)?;
+        let efficiency: Efficiency = efficiency.parse().map_err(python_error)?;
         Ok(Self {
             inner: Solver::new(SolveConfig {
                 method,
                 cross_mode,
                 f2l_strategy,
+                efficiency,
                 trace,
                 exploration,
                 max_exploration_states,
@@ -177,7 +180,7 @@ fn verify_solution(state: &str, solution: &str) -> PyResult<bool> {
 
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (count, seed=0, difficulty="hard", scramble_length=0, solutions_per_scramble=1, method="fast", threads=0, trace=false, exploration=false, cross="cross", f2l="lookahead"))]
+#[pyo3(signature = (count, seed=0, difficulty="hard", scramble_length=0, solutions_per_scramble=1, method="fast", threads=0, trace=false, exploration=false, cross="cross", f2l="lookahead", efficiency="balanced", max_depth=30, probe_limit=1_000_000))]
 fn generate(
     py: Python<'_>,
     count: usize,
@@ -191,6 +194,9 @@ fn generate(
     exploration: bool,
     cross: &str,
     f2l: &str,
+    efficiency: &str,
+    max_depth: usize,
+    probe_limit: u64,
 ) -> PyResult<PyObject> {
     let config = py_generate_config(
         count,
@@ -204,6 +210,9 @@ fn generate(
         exploration,
         cross,
         f2l,
+        efficiency,
+        max_depth,
+        probe_limit,
     )?;
     let records = py
         .allow_threads(|| generate_dataset(&config))
@@ -213,7 +222,7 @@ fn generate(
 
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (path, count, seed=0, difficulty="hard", scramble_length=0, solutions_per_scramble=1, method="fast", threads=0, batch_size=1024, trace=false, exploration=false, cross="cross", f2l="lookahead"))]
+#[pyo3(signature = (path, count, seed=0, difficulty="hard", scramble_length=0, solutions_per_scramble=1, method="fast", threads=0, batch_size=1024, trace=false, exploration=false, cross="cross", f2l="lookahead", efficiency="balanced", max_depth=30, probe_limit=1_000_000))]
 fn generate_jsonl(
     py: Python<'_>,
     path: PathBuf,
@@ -229,6 +238,9 @@ fn generate_jsonl(
     exploration: bool,
     cross: &str,
     f2l: &str,
+    efficiency: &str,
+    max_depth: usize,
+    probe_limit: u64,
 ) -> PyResult<()> {
     let config = py_generate_config(
         count,
@@ -242,6 +254,9 @@ fn generate_jsonl(
         exploration,
         cross,
         f2l,
+        efficiency,
+        max_depth,
+        probe_limit,
     )?;
     py.allow_threads(|| generate_to_jsonl(&config, path, batch_size))
         .map_err(python_error)
@@ -260,6 +275,9 @@ fn py_generate_config(
     exploration: bool,
     cross: &str,
     f2l: &str,
+    efficiency: &str,
+    max_depth: usize,
+    probe_limit: u64,
 ) -> PyResult<GenerateConfig> {
     let difficulty = match difficulty.to_ascii_lowercase().as_str() {
         "easy" => Difficulty::Easy,
@@ -274,6 +292,7 @@ fn py_generate_config(
     let method: SolveMethod = method.parse().map_err(python_error)?;
     let cross_mode: CrossMode = cross.parse().map_err(python_error)?;
     let f2l_strategy: F2lStrategy = f2l.parse().map_err(python_error)?;
+    let efficiency: Efficiency = efficiency.parse().map_err(python_error)?;
     Ok(GenerateConfig {
         count,
         seed,
@@ -283,6 +302,9 @@ fn py_generate_config(
         method,
         cross_mode,
         f2l_strategy,
+        efficiency,
+        max_depth,
+        probe_limit,
         trace,
         exploration,
         max_exploration_states: 72,

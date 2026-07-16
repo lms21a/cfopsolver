@@ -39,7 +39,7 @@ frames, and combined corner/edge/center parity.
 ## Rust
 
 ```rust
-use cfop_solver::{CrossMode, Cube, F2lStrategy, SolveConfig, Solver};
+use cfop_solver::{CrossMode, Cube, Efficiency, F2lStrategy, SolveConfig, Solver};
 
 let cube = Cube::from_scramble("R U2 F' L D")?;
 
@@ -55,6 +55,7 @@ assert!(cursor.is_solved());
 let result = Solver::new(SolveConfig {
     cross_mode: CrossMode::XXCross,
     f2l_strategy: F2lStrategy::Lookahead,
+    efficiency: Efficiency::Thorough,
     trace: true,
     exploration: true,
     alternatives: 2,
@@ -79,6 +80,26 @@ the bottom cross together with at least one, two, or three F2L pairs. Exact-targ
 search may shorten that combined phase while preserving its chosen endpoint.
 `F2lStrategy::Lookahead` evaluates alternative U-face alignments before each pair and
 is the default; `Standard` keeps the simpler deterministic route.
+
+`Efficiency` controls how much additional search is spent reducing moves. Every level
+retains the plans considered by lower levels. Candidate plans are exact-shortened and
+scored as complete, simplified CFOP solutions before selection, so increasing the
+profile cannot discard the best lower-profile route already found:
+
+| Profile | F2L planning | Exact-target optimization |
+|---|---|---|
+| `Fast` | Single deterministic route | Disabled |
+| `Balanced` | Adds four-AUF greedy lookahead | Up to 100,000 probes |
+| `Thorough` | Adds a four-state beam | Up to 500,000 probes |
+| `Max` | Adds a 64-state pair beam | Up to `probe_limit` |
+
+`Balanced` is the default. `probe_limit` remains the hard ceiling, so lowering it also
+caps the thorough and max profiles. The profile affects staged CFOP solving;
+`SolveMethod::Fast` continues to use its existing two-phase probe settings. AUF and
+beam expansion require `F2lStrategy::Lookahead`; with `Standard`, higher profiles only
+increase exact-target budgets. Serialized `efficiency` values record the requested
+configuration, including on non-primary fast alternatives where the profile is not
+applied.
 
 ## Python
 
@@ -107,6 +128,8 @@ solver = cfop.Solver(
     method="cfop",
     cross="xxcross",
     f2l="lookahead",
+    efficiency="thorough",
+    probe_limit=500_000,
     trace=True,
     exploration=True,
     max_exploration_states=64,
@@ -143,7 +166,13 @@ the same `moves` key, so phase actions do not need to be recovered from prose. T
 `repaired` marker is set only if a mutable upstream stage diverges from its returned
 move list; `optimized` means exact-target search found a shorter route to the same
 verified endpoint. Dataset records using this expanded structure declare
-`schema: "cfop-dataset/v2"`.
+`schema: "cfop-dataset/v3"`.
+
+Solve results expose `stats.f2l_candidates_evaluated`,
+`stats.exact_target_searches`, and `stats.last_layer_evaluations`, making the cost of
+an efficiency profile visible instead of encoding it only in elapsed time. Generated
+primary solutions retain these counters with wall-clock timing zeroed for deterministic
+output.
 
 ## Bulk generation
 
@@ -169,6 +198,7 @@ records = cfop.generate(
     method="cfop",
     cross="xxcross",
     f2l="lookahead",
+    efficiency="thorough",
     trace=True,
     threads=8,
 )
@@ -206,21 +236,29 @@ variants only as an explicitly labeled final fallback.
 
 ```bash
 cfop solve --scramble "R U F" --method cfop \
-  --cross xxcross --f2l lookahead --trace --explore --json
+  --cross xxcross --f2l lookahead --efficiency thorough --trace --explore --json
 cfop apply --state "$STATE" --moves "R U R' U'"
 cfop verify --scramble "R U F" --solution "F' U' R'"
-cfop generate --count 1000 --output data.jsonl --solutions 2 --threads 4
+cfop generate --count 1000 --output data.jsonl --method cfop \
+  --efficiency thorough --probe-limit 500000 --solutions 2 --threads 4
 ```
 
 ## Performance snapshot
 
-On the development machine, the release binary generated and verified 2,000 hard
-standard-F2L CFOP records in 1.22 seconds on four threads (about 1,640 records/s).
-Dynamic-lookahead F2L generated the same 2,000 seeded records in 2.08 seconds (about
-960 records/s); XXX-cross plus lookahead generated 1,000 in 1.56 seconds (about 640
-records/s). On the shared 2,000 scrambles, lookahead reduced mean F2L work from 32.65
-to 30.49 moves and mean full solutions from 64.21 to 61.94 moves. Treat these as a
-local snapshot; hardware, trace output, and solver options materially affect throughput.
+On the development machine, a fixed batch of 500 hard, 20-move scrambles using CFOP,
+XXX-cross, lookahead F2L, four generation threads, and no trace produced:
+
+| Efficiency | Mean solution | Time | Throughput |
+|---|---:|---:|---:|
+| `fast` | 64.06 moves | 0.39 s | ~1,280 records/s |
+| `balanced` | 50.80 moves | 1.31 s | ~382 records/s |
+| `thorough` | 48.86 moves | 3.33 s | ~150 records/s |
+| `max` | 48.19 moves | 6.24 s | ~80 records/s |
+
+Across those identical scrambles, no higher profile returned a longer solution than
+the preceding profile. Search effort rose from 3.95 to 19.78 to 53.24 to 111.41 mean
+F2L candidate evaluations. Treat these as a local snapshot; hardware, selected cross
+mode, trace output, and probe limits materially affect throughput.
 
 ## Development
 

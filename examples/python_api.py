@@ -5,6 +5,7 @@ solver = cfop.Solver(
     method="cfop",
     cross="xxcross",
     f2l="lookahead",
+    efficiency="thorough",
     trace=True,
     exploration=True,
     max_exploration_states=12,

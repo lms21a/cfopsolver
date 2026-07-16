@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use cfop_solver::{
-    CrossMode, Cube, F2lStrategy, SolveConfig, SolveMethod, Solver, Stage, TraceEvent,
+    CrossMode, Cube, Efficiency, F2lStrategy, SolveConfig, SolveMethod, Solver, Stage, TraceEvent,
 };
 
 #[test]
@@ -140,6 +140,51 @@ fn lookahead_reduces_f2l_moves_on_the_reference_scramble() {
             .sum::<usize>()
     };
     assert!(f2l_moves(&lookahead) < f2l_moves(&standard));
+}
+
+#[test]
+fn efficiency_profiles_trade_search_work_for_solution_quality() {
+    let scrambles = [
+        "D R2 B2 L2 F L B' R' L D F U' B2 D' L R2 F2 L2 F' B'",
+        "B' F D' U2 B F R2 F' B' F B2 R' F U' B R' U' L2 U' R2",
+    ];
+    for scramble in scrambles {
+        let cube = Cube::from_scramble(scramble).unwrap();
+        let results = [
+            Efficiency::Fast,
+            Efficiency::Balanced,
+            Efficiency::Thorough,
+            Efficiency::Max,
+        ]
+        .iter()
+        .copied()
+        .map(|efficiency| {
+            Solver::new(SolveConfig {
+                cross_mode: CrossMode::XXXCross,
+                efficiency,
+                ..SolveConfig::default()
+            })
+            .solve(&cube)
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+
+        assert!(results.iter().all(|result| result.verified));
+        for adjacent in results.windows(2) {
+            assert!(adjacent[1].stats.move_count <= adjacent[0].stats.move_count);
+            assert!(
+                adjacent[1].stats.f2l_candidates_evaluated
+                    > adjacent[0].stats.f2l_candidates_evaluated
+            );
+            assert!(
+                adjacent[1].stats.exact_target_searches > adjacent[0].stats.exact_target_searches
+            );
+            assert!(
+                adjacent[1].stats.last_layer_evaluations > adjacent[0].stats.last_layer_evaluations
+            );
+        }
+        assert_eq!(results[0].stats.exact_target_searches, 0);
+    }
 }
 
 fn assert_trace_moves_are_attached(trace: &[TraceEvent]) {

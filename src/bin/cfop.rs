@@ -1,8 +1,8 @@
 use std::{collections::HashMap, env, process};
 
 use cfop_solver::{
-    generate_to_jsonl, CrossMode, Cube, Difficulty, F2lStrategy, GenerateConfig, SolveConfig,
-    SolveMethod, Solver,
+    generate_to_jsonl, CrossMode, Cube, Difficulty, Efficiency, F2lStrategy, GenerateConfig,
+    SolveConfig, SolveMethod, Solver,
 };
 
 fn main() {
@@ -30,6 +30,9 @@ fn run() -> cfop_solver::Result<()> {
                 f2l_strategy: option(&options, "f2l")
                     .unwrap_or("lookahead")
                     .parse::<F2lStrategy>()?,
+                efficiency: option(&options, "efficiency")
+                    .unwrap_or("balanced")
+                    .parse::<Efficiency>()?,
                 trace: flag(&options, "trace"),
                 exploration: flag(&options, "explore"),
                 max_exploration_states: number(&options, "max-exploration", 72)?,
@@ -85,6 +88,11 @@ fn run() -> cfop_solver::Result<()> {
                 f2l_strategy: option(&options, "f2l")
                     .unwrap_or("lookahead")
                     .parse::<F2lStrategy>()?,
+                efficiency: option(&options, "efficiency")
+                    .unwrap_or("balanced")
+                    .parse::<Efficiency>()?,
+                max_depth: number(&options, "max-depth", 30)?,
+                probe_limit: number(&options, "probe-limit", 1_000_000)?,
                 trace: flag(&options, "trace"),
                 exploration: flag(&options, "explore"),
                 max_exploration_states: number(&options, "max-exploration", 72)?,
@@ -174,9 +182,9 @@ where
 fn print_usage() {
     println!(
         "cfop-solver\n\n\
-         solve    [--scramble MOVES | --state FACELETS] [--method cfop|fast] [--cross cross|xcross|xxcross|xxxcross] [--f2l standard|lookahead] [--trace] [--explore] [--alternatives N] [--json]\n\
+         solve    [--scramble MOVES | --state FACELETS] [--method cfop|fast] [--cross cross|xcross|xxcross|xxxcross] [--f2l standard|lookahead] [--efficiency fast|balanced|thorough|max] [--trace] [--explore] [--alternatives N] [--json]\n\
          apply    [--scramble MOVES | --state FACELETS] --moves MOVES\n\
          verify   [--scramble MOVES | --state FACELETS] --solution MOVES\n\
-         generate --count N --output FILE [--difficulty easy|medium|hard] [--cross MODE] [--f2l STRATEGY] [--solutions N] [--threads N]"
+         generate --count N --output FILE [--difficulty easy|medium|hard] [--cross MODE] [--f2l STRATEGY] [--efficiency PROFILE] [--max-depth N] [--probe-limit N] [--solutions N] [--threads N]"
     );
 }

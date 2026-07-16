@@ -13,6 +13,7 @@ def test_python_api() -> None:
         method="cfop",
         cross="xcross",
         f2l="lookahead",
+        efficiency="thorough",
         trace=True,
         exploration=True,
         max_exploration_states=8,
@@ -24,6 +25,10 @@ def test_python_api() -> None:
     assert result["stages"][0]["stage"] == "xcross"
     assert result["stages"][-2]["stage"] == "oll"
     assert result["stages"][-1]["stage"] == "pll"
+    assert result["efficiency"] == "thorough"
+    assert result["stats"]["f2l_candidates_evaluated"] > 0
+    assert result["stats"]["exact_target_searches"] > 0
+    assert result["stats"]["last_layer_evaluations"] > 0
     pairs = [pair for stage in result["stages"] for pair in stage.get("f2l_pairs", [])]
     assert len(pairs) == len(set(pairs)) == 4
     assert all("moves" in event for event in result["trace"] if event["kind"] != "phase_start")
@@ -34,9 +39,23 @@ def test_python_api() -> None:
         seed=7,
         difficulty="easy",
         solutions_per_scramble=2,
+        method="cfop",
         threads=2,
+        cross="xcross",
+        efficiency="thorough",
+        probe_limit=200_000,
     )
     assert all(solution["verified"] for row in records for solution in row["solutions"])
+    assert all(
+        solution["efficiency"] == "thorough" for row in records for solution in row["solutions"]
+    )
+    assert records[0]["solutions"][0]["stats"]["f2l_candidates_evaluated"] > 0
+    assert records[0]["solutions"][0]["stats"]["exact_target_searches"] > 0
+    assert all(
+        solution["stats"]["move_count"] == solution["move_count"]
+        for row in records
+        for solution in row["solutions"]
+    )
 
     with tempfile.NamedTemporaryFile(suffix=".jsonl") as output:
         cfop.generate_jsonl(output.name, 12, seed=8, batch_size=5, threads=2)
