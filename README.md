@@ -72,10 +72,19 @@ than silently returning fewer solutions.
 
 ## Python
 
-Build and install into the active virtual environment:
+The Python project and its development tools are managed by
+[uv](https://docs.astral.sh/uv/). The first command creates or updates `.venv`,
+installs the extension in editable mode, and syncs the versions in `uv.lock`:
 
 ```bash
-maturin develop --release
+uv sync
+uv run python examples/python_api.py
+```
+
+The environment remains an ordinary virtual environment, so direct execution works too:
+
+```bash
+.venv/bin/python examples/python_api.py
 ```
 
 ```python
@@ -181,10 +190,18 @@ snapshot; hardware and scramble/alternative settings materially affect throughpu
 ## Development
 
 ```bash
+uv sync
+uv lock --check
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy
+uv build --wheel
+
 cargo test
 cargo check --features python
-maturin build --release
 ```
 
-The dependency lock is intentionally retained because this checkout currently targets
-Rust 1.70 as well as Python 3.12.
+`uv.lock` controls Python build and development dependencies; `Cargo.lock` controls
+Rust dependencies. The checkout currently targets Rust 1.70, publishes an abi3 wheel
+for Python 3.8+, and uses Python 3.12 for local development via `.python-version`.

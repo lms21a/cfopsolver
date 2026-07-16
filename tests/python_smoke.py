@@ -1,11 +1,11 @@
-"""Run after installing the maturin wheel into the active Python environment."""
+"""End-to-end smoke tests for the uv-managed Python extension."""
 
 import tempfile
 
 import cfop_solver as cfop
 
 
-def main() -> None:
+def test_python_api() -> None:
     cube = cfop.Cube.from_scramble("R U2 F' L D")
     assert cube.verify("D' L' F U2 R'")
 
@@ -42,4 +42,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    test_python_api()
