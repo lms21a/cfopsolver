@@ -249,6 +249,8 @@ pub enum Stage {
     F2lPair,
     Oll,
     Pll,
+    /// Combined OLL+PLL evaluation used by real decision records.
+    LastLayer,
     Fast,
 }
 
@@ -264,6 +266,7 @@ impl fmt::Display for Stage {
             Self::F2lPair => "f2l_pair",
             Self::Oll => "oll",
             Self::Pll => "pll",
+            Self::LastLayer => "last_layer",
             Self::Fast => "fast",
         })
     }
@@ -279,6 +282,13 @@ pub struct SolveConfig {
     pub trace: bool,
     pub exploration: bool,
     pub max_exploration_states: usize,
+    /// Emit bounded, structured records from the searches that made the
+    /// committed decisions. Disabled by default and independent of the legacy
+    /// phase trace and one-ply exploration snapshot.
+    pub decisions: bool,
+    /// Hard cap on structured decision records. Search continues normally
+    /// after the recorder reaches this limit.
+    pub max_decision_records: usize,
     /// Number of distinct additional solutions to request.
     pub alternatives: usize,
     pub max_depth: usize,
@@ -295,6 +305,8 @@ impl Default for SolveConfig {
             trace: false,
             exploration: false,
             max_exploration_states: 72,
+            decisions: false,
+            max_decision_records: 512,
             alternatives: 0,
             max_depth: 30,
             probe_limit: 1_000_000,
@@ -372,6 +384,135 @@ pub struct ExplorationEvent {
     pub reason: String,
 }
 
+pub const DECISION_TRACE_SCHEMA: &str = "cfop-decisions/v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionDomain {
+    Phase,
+    F2lVariant,
+    F2lBeam,
+    ExactTarget,
+    LastLayer,
+    TwoPhase,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionKind {
+    SearchStart,
+    Candidate,
+    Evaluation,
+    CacheHit,
+    Prune,
+    Backtrack,
+    Select,
+    SearchEnd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionOutcome {
+    Considered,
+    Accepted,
+    Rejected,
+    Pruned,
+    Selected,
+    Failed,
+    Cached,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionReason {
+    SetupNormalization,
+    PhaseCommitted,
+    VariantStarted,
+    VariantCompleted,
+    VariantFailed,
+    PairProgress,
+    NoPairProgress,
+    PairRegression,
+    DuplicateState,
+    BeamWidth,
+    TerminalScored,
+    LowerTotalMoves,
+    HigherTotalMoves,
+    CacheHit,
+    ExactFound,
+    ExactUnavailable,
+    ExactShorter,
+    ExactNotShorter,
+    LastLayerSolved,
+    TwoPhaseSolution,
+}
+
+/// Deterministic, domain-specific search scores. Wall-clock values are
+/// intentionally excluded so seeded datasets remain reproducible.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DecisionScore {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_moves: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub heuristic: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_total: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_moves: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_layer_moves: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub solved_pairs: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub beam_width: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auf: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_limit: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecisionRecord {
+    /// Stable per-solve identifier.
+    pub index: usize,
+    /// Earlier decision that explains this record's provenance. This is not
+    /// necessarily a state-transition edge; use `start_state` to replay moves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<usize>,
+    pub stage: Stage,
+    pub domain: DecisionDomain,
+    pub kind: DecisionKind,
+    pub depth: usize,
+    pub outcome: DecisionOutcome,
+    pub reason: DecisionReason,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub f2l_pairs: Vec<F2lPair>,
+    #[serde(
+        rename = "moves",
+        alias = "algorithm",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub algorithm: Option<Algorithm>,
+    /// Exact replay origin when `moves` represents a state transition.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_state: Option<String>,
+    /// Evaluated or resulting state. With `start_state` and `moves`, this is
+    /// guaranteed to be the replayed transition endpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<DecisionScore>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecisionTrace {
+    pub schema: String,
+    pub truncated: bool,
+    pub dropped_records: usize,
+    pub records: Vec<DecisionRecord>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SolveStats {
     pub method: SolveMethod,
@@ -411,9 +552,156 @@ pub struct SolveResult {
     pub trace: Vec<TraceEvent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exploration: Vec<ExplorationEvent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decisions: Option<DecisionTrace>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alternatives: Vec<AlternativeSolution>,
     pub stats: SolveStats,
+}
+
+struct DecisionRecorder {
+    enabled: bool,
+    max_records: usize,
+    attempted_records: usize,
+    records: Vec<DecisionRecord>,
+}
+
+impl DecisionRecorder {
+    fn new(config: &SolveConfig) -> Self {
+        Self {
+            enabled: config.decisions,
+            max_records: config.max_decision_records,
+            attempted_records: 0,
+            records: Vec::with_capacity(config.max_decision_records.min(if config.decisions {
+                512
+            } else {
+                0
+            })),
+        }
+    }
+
+    /// Builds records only when instrumentation is enabled. This keeps state
+    /// serialization and message allocation entirely off the default path;
+    /// enabled streams may build omitted records so late priority decisions
+    /// can replace earlier ones without affecting search behavior.
+    fn record(&mut self, build: impl FnOnce(usize) -> DecisionRecord) -> Option<usize> {
+        if !self.enabled {
+            return None;
+        }
+        let index = self.attempted_records;
+        self.attempted_records = self.attempted_records.saturating_add(1);
+        if self.max_records == 0 {
+            return None;
+        }
+        let record = build(index);
+        // Keep early candidate/cache chatter from consuming the entire trace.
+        // Priority buckets retain the latest selections and phase commits, so
+        // tiny caps still contain the decisions that actually finished the
+        // solve. Logical IDs remain stable even if an earlier priority record
+        // is evicted; dangling provenance parents are removed in `finish`.
+        let quarter_rounded_up = self.max_records.saturating_add(3) / 4;
+        let phase_reserve = quarter_rounded_up.min(16);
+        let selection_reserve = quarter_rounded_up
+            .min(48)
+            .min(self.max_records.saturating_sub(phase_reserve));
+        let selection_limit = self.max_records.saturating_sub(phase_reserve);
+        let normal_limit = selection_limit.saturating_sub(selection_reserve);
+        let is_phase = record.domain == DecisionDomain::Phase;
+        let is_selection =
+            !is_phase && matches!(record.kind, DecisionKind::Select | DecisionKind::SearchEnd);
+        let retained = if is_phase {
+            let phase_count = self
+                .records
+                .iter()
+                .filter(|existing| existing.domain == DecisionDomain::Phase)
+                .count();
+            if phase_count < phase_reserve {
+                self.records.push(record);
+                true
+            } else if let Some(position) = self
+                .records
+                .iter()
+                .position(|existing| existing.domain == DecisionDomain::Phase)
+            {
+                self.records[position] = record;
+                true
+            } else {
+                false
+            }
+        } else if is_selection {
+            let selection_count = self
+                .records
+                .iter()
+                .filter(|existing| {
+                    existing.domain != DecisionDomain::Phase
+                        && matches!(
+                            existing.kind,
+                            DecisionKind::Select | DecisionKind::SearchEnd
+                        )
+                })
+                .count();
+            if selection_count < selection_reserve {
+                self.records.push(record);
+                true
+            } else if let Some(position) = self.records.iter().position(|existing| {
+                existing.domain != DecisionDomain::Phase
+                    && matches!(
+                        existing.kind,
+                        DecisionKind::Select | DecisionKind::SearchEnd
+                    )
+            }) {
+                self.records[position] = record;
+                true
+            } else {
+                false
+            }
+        } else {
+            let normal_count = self
+                .records
+                .iter()
+                .filter(|existing| {
+                    existing.domain != DecisionDomain::Phase
+                        && !matches!(
+                            existing.kind,
+                            DecisionKind::Select | DecisionKind::SearchEnd
+                        )
+                })
+                .count();
+            if normal_count < normal_limit {
+                self.records.push(record);
+                true
+            } else {
+                false
+            }
+        };
+        retained.then_some(index)
+    }
+
+    fn finish(mut self) -> Option<DecisionTrace> {
+        self.enabled.then(|| {
+            self.records.sort_unstable_by_key(|record| record.index);
+            let retained_ids = self
+                .records
+                .iter()
+                .map(|record| record.index)
+                .collect::<HashSet<_>>();
+            for record in &mut self.records {
+                if record
+                    .parent_id
+                    .is_some_and(|parent| !retained_ids.contains(&parent))
+                {
+                    record.parent_id = None;
+                }
+            }
+            let dropped_records = self.attempted_records.saturating_sub(self.records.len());
+            DecisionTrace {
+                schema: DECISION_TRACE_SCHEMA.into(),
+                truncated: dropped_records > 0,
+                dropped_records,
+                records: self.records,
+            }
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -433,6 +721,7 @@ impl Solver {
     pub fn solve(&self, cube: &Cube) -> Result<SolveResult> {
         let started = Instant::now();
         let input_state = cube.facelets();
+        let mut decisions = DecisionRecorder::new(&self.config);
         if cube.is_solved() {
             let solution = Algorithm::default();
             let mut alternatives = Vec::new();
@@ -453,6 +742,7 @@ impl Solver {
                 stages: Vec::new(),
                 trace: Vec::new(),
                 exploration: Vec::new(),
+                decisions: decisions.finish(),
                 alternatives,
                 stats: SolveStats {
                     method: self.config.method,
@@ -466,9 +756,30 @@ impl Solver {
             });
         }
         let (working_cube, setup) = cube.normalized_orientation();
+        if !setup.is_empty() {
+            decisions.record(|index| DecisionRecord {
+                index,
+                parent_id: None,
+                stage: Stage::Setup,
+                domain: DecisionDomain::Phase,
+                kind: DecisionKind::Select,
+                depth: 0,
+                outcome: DecisionOutcome::Selected,
+                reason: DecisionReason::SetupNormalization,
+                message: "normalized the cube into the canonical URFDLB solving frame".into(),
+                f2l_pairs: Vec::new(),
+                algorithm: Some(setup.clone()),
+                start_state: Some(cube.facelets()),
+                state: Some(working_cube.facelets()),
+                score: Some(DecisionScore {
+                    path_moves: Some(setup.len()),
+                    ..DecisionScore::default()
+                }),
+            });
+        }
         let mut result = match self.config.method {
-            SolveMethod::Cfop => self.solve_cfop(&working_cube)?,
-            SolveMethod::Fast => self.solve_fast(&working_cube)?,
+            SolveMethod::Cfop => self.solve_cfop(&working_cube, &mut decisions)?,
+            SolveMethod::Fast => self.solve_fast(&working_cube, &mut decisions)?,
         };
 
         if self.config.alternatives > 0 {
@@ -559,6 +870,7 @@ impl Solver {
         result.stats.elapsed_micros = micros(started.elapsed().as_micros());
         result.stats.move_count = result.solution.len();
         result.stats.exploration_states = result.exploration.len();
+        result.decisions = decisions.finish();
         Ok(result)
     }
 
@@ -566,13 +878,13 @@ impl Solver {
         self.solve(&Cube::from_scramble(scramble)?)
     }
 
-    fn solve_cfop(&self, input: &Cube) -> Result<SolveResult> {
+    fn solve_cfop(&self, input: &Cube, decisions: &mut DecisionRecorder) -> Result<SolveResult> {
         let mut cube = *input;
         let mut stages = Vec::with_capacity(8);
         let mut trace = Vec::new();
         let mut exploration = Vec::new();
         let mut complete = Vec::new();
-        let mut search_metrics = SearchMetrics::default();
+        let mut search_metrics = SearchMetrics::new(decisions);
 
         let cross_started = Instant::now();
         let (plain_cross_end, plain_cross, cross_repaired) = run_cfop_stage(Stage::Cross, cube)?;
@@ -593,6 +905,7 @@ impl Solver {
         let cross_optimized = pair_plan.cross_optimized;
         let remaining_pair_steps = pair_plan.remaining_steps;
         let last_layer = pair_plan.last_layer;
+        let route_decision_id = pair_plan.decision_id;
         let cross_pairs = f2l_pairs(f2l_pair_mask(&advanced_end));
         let cross_stage = self.config.cross_mode.stage();
         if !stage_is_solved(cross_stage, &advanced_end) {
@@ -623,6 +936,8 @@ impl Solver {
             &mut stages,
             &mut trace,
             &mut exploration,
+            search_metrics.decisions,
+            route_decision_id,
             cross_stage,
             cube,
             advanced_end,
@@ -651,6 +966,8 @@ impl Solver {
                 &mut stages,
                 &mut trace,
                 &mut exploration,
+                search_metrics.decisions,
+                step.decision_id,
                 Stage::F2lPair,
                 cube,
                 step.end,
@@ -677,6 +994,8 @@ impl Solver {
             &mut stages,
             &mut trace,
             &mut exploration,
+            search_metrics.decisions,
+            route_decision_id,
             Stage::Oll,
             cube,
             last_layer.after_oll,
@@ -696,6 +1015,8 @@ impl Solver {
             &mut stages,
             &mut trace,
             &mut exploration,
+            search_metrics.decisions,
+            route_decision_id,
             Stage::Pll,
             cube,
             last_layer.solved,
@@ -725,6 +1046,7 @@ impl Solver {
             stages,
             trace,
             exploration,
+            decisions: None,
             alternatives: Vec::new(),
             stats: SolveStats {
                 method: SolveMethod::Cfop,
@@ -738,7 +1060,7 @@ impl Solver {
         })
     }
 
-    fn solve_fast(&self, input: &Cube) -> Result<SolveResult> {
+    fn solve_fast(&self, input: &Cube, decisions: &mut DecisionRecorder) -> Result<SolveResult> {
         let start = Instant::now();
         let solution = if input.is_solved() {
             Algorithm::default()
@@ -747,6 +1069,27 @@ impl Solver {
         };
         let end = input.after_algorithm(&solution);
         let elapsed_micros = micros(start.elapsed().as_micros());
+        decisions.record(|index| DecisionRecord {
+            index,
+            parent_id: None,
+            stage: Stage::Fast,
+            domain: DecisionDomain::TwoPhase,
+            kind: DecisionKind::Select,
+            depth: 0,
+            outcome: DecisionOutcome::Selected,
+            reason: DecisionReason::TwoPhaseSolution,
+            message: "selected the two-phase solution found within the configured probe limit"
+                .into(),
+            f2l_pairs: Vec::new(),
+            algorithm: Some(solution.clone()),
+            start_state: Some(input.facelets()),
+            state: Some(end.facelets()),
+            score: Some(DecisionScore {
+                path_moves: Some(solution.len()),
+                probe_limit: Some(self.config.probe_limit),
+                ..DecisionScore::default()
+            }),
+        });
         let trace = if self.config.trace {
             vec![
                 TraceEvent {
@@ -794,6 +1137,7 @@ impl Solver {
             }],
             trace,
             exploration: Vec::new(),
+            decisions: None,
             alternatives: Vec::new(),
             stats: SolveStats {
                 method: SolveMethod::Fast,
@@ -816,6 +1160,7 @@ struct F2lStep {
     elapsed_micros: u64,
     repaired: bool,
     optimized: bool,
+    decision_id: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -826,16 +1171,31 @@ struct F2lCandidate {
     pairs: Vec<F2lPair>,
     estimated_total: usize,
     repaired: bool,
+    auf: u8,
 }
 
-#[derive(Default)]
-struct SearchMetrics {
+struct SearchMetrics<'a> {
     f2l_candidates_evaluated: usize,
     exact_target_searches: usize,
     last_layer_evaluations: usize,
     f2l_cache: HashMap<(CubeKey, u8, bool), Option<F2lCandidate>>,
     exact_cache: HashMap<ExactSearchKey, Option<Algorithm>>,
     last_layer_cache: HashMap<CubeKey, LastLayerPlan>,
+    decisions: &'a mut DecisionRecorder,
+}
+
+impl<'a> SearchMetrics<'a> {
+    fn new(decisions: &'a mut DecisionRecorder) -> Self {
+        Self {
+            f2l_candidates_evaluated: 0,
+            exact_target_searches: 0,
+            last_layer_evaluations: 0,
+            f2l_cache: HashMap::new(),
+            exact_cache: HashMap::new(),
+            last_layer_cache: HashMap::new(),
+            decisions,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -843,29 +1203,7 @@ struct CubeKey([u8; 46]);
 
 impl From<Cube> for CubeKey {
     fn from(cube: Cube) -> Self {
-        let mut key = [0; 46];
-        let mut index = 0;
-        for center in cube.inner.center {
-            key[index] = center as u8;
-            index += 1;
-        }
-        for corner in cube.inner.cp {
-            key[index] = corner as u8;
-            index += 1;
-        }
-        for orientation in cube.inner.co {
-            key[index] = orientation;
-            index += 1;
-        }
-        for edge in cube.inner.ep {
-            key[index] = edge as u8;
-            index += 1;
-        }
-        for orientation in cube.inner.eo {
-            key[index] = orientation;
-            index += 1;
-        }
-        Self(key)
+        Self(cube.cubie_feature_ids())
     }
 }
 
@@ -884,12 +1222,14 @@ struct F2lPlanNode {
     move_count: usize,
     priority: usize,
     last_layer: Option<LastLayerPlan>,
+    decision_id: Option<usize>,
 }
 
 #[derive(Debug)]
 struct F2lPlan {
     steps: Vec<F2lStep>,
     last_layer: LastLayerPlan,
+    decision_id: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -900,6 +1240,7 @@ struct F2lRoute {
     remaining_steps: Vec<F2lStep>,
     last_layer: LastLayerPlan,
     move_count: usize,
+    decision_id: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -997,6 +1338,8 @@ fn record_phase(
     stages: &mut Vec<StageResult>,
     trace: &mut Vec<TraceEvent>,
     exploration: &mut Vec<ExplorationEvent>,
+    decisions: &mut DecisionRecorder,
+    parent_decision_id: Option<usize>,
     stage: Stage,
     start: Cube,
     end: Cube,
@@ -1020,6 +1363,32 @@ fn record_phase(
     if optimized {
         decision.push_str("; exact-target search shortened the selected branch");
     }
+
+    let decision_depth = stages.len();
+    decisions.record(|index| DecisionRecord {
+        index,
+        parent_id: parent_decision_id,
+        stage,
+        domain: DecisionDomain::Phase,
+        kind: DecisionKind::Select,
+        depth: decision_depth,
+        outcome: DecisionOutcome::Selected,
+        reason: DecisionReason::PhaseCommitted,
+        message: decision.clone(),
+        f2l_pairs: f2l_pairs.clone(),
+        algorithm: Some(algorithm.clone()),
+        start_state: Some(start.facelets()),
+        state: Some(end.facelets()),
+        score: Some(DecisionScore {
+            path_moves: Some(algorithm.len()),
+            solved_pairs: matches!(
+                stage,
+                Stage::XCross | Stage::XXCross | Stage::XXXCross | Stage::F2l | Stage::F2lPair
+            )
+            .then_some(f2l_pair_mask(&end).count_ones() as u8),
+            ..DecisionScore::default()
+        }),
+    });
 
     if config.exploration && exploration.len() < config.max_exploration_states {
         append_stage_exploration(
@@ -1140,6 +1509,28 @@ fn plan_f2l_pairs_until(
     let mut plans = Vec::with_capacity(variants.len());
     let mut first_error = None;
     for (all_aufs, beam_width, single_pair_only) in variants {
+        let variant_id = metrics.decisions.record(|index| DecisionRecord {
+            index,
+            parent_id: None,
+            stage: Stage::F2l,
+            domain: DecisionDomain::F2lVariant,
+            kind: DecisionKind::SearchStart,
+            depth: 0,
+            outcome: DecisionOutcome::Considered,
+            reason: DecisionReason::VariantStarted,
+            message: format!(
+                "started F2L variant: all_aufs={all_aufs}, beam_width={beam_width}, single_pair_only={single_pair_only}"
+            ),
+            f2l_pairs: Vec::new(),
+            algorithm: None,
+            start_state: None,
+            state: Some(cube.facelets()),
+            score: Some(DecisionScore {
+                solved_pairs: Some(f2l_pair_mask(&cube).count_ones() as u8),
+                beam_width: Some(beam_width),
+                ..DecisionScore::default()
+            }),
+        });
         match beam_f2l_plan(
             cube,
             strategy,
@@ -1147,10 +1538,58 @@ fn plan_f2l_pairs_until(
             single_pair_only,
             beam_width,
             target_pair_count,
+            variant_id,
             metrics,
         ) {
-            Ok(plan) => plans.push(plan),
+            Ok(mut plan) => {
+                let completed_id = metrics.decisions.record(|index| DecisionRecord {
+                    index,
+                    parent_id: plan.decision_id.or(variant_id),
+                    stage: Stage::F2l,
+                    domain: DecisionDomain::F2lVariant,
+                    kind: DecisionKind::SearchEnd,
+                    depth: plan.steps.len(),
+                    outcome: DecisionOutcome::Accepted,
+                    reason: DecisionReason::VariantCompleted,
+                    message: "completed an F2L search variant with a solved last layer plan".into(),
+                    f2l_pairs: plan
+                        .steps
+                        .iter()
+                        .flat_map(|step| step.pairs.iter().copied())
+                        .collect(),
+                    algorithm: None,
+                    start_state: None,
+                    state: plan.steps.last().map(|step| step.end.facelets()),
+                    score: Some(DecisionScore {
+                        path_moves: Some(plan.steps.iter().map(|step| step.algorithm.len()).sum()),
+                        last_layer_moves: Some(plan.last_layer.combined.len()),
+                        beam_width: Some(beam_width),
+                        ..DecisionScore::default()
+                    }),
+                });
+                plan.decision_id = completed_id.or(plan.decision_id).or(variant_id);
+                plans.push(plan);
+            }
             Err(error) => {
+                metrics.decisions.record(|index| DecisionRecord {
+                    index,
+                    parent_id: variant_id,
+                    stage: Stage::F2l,
+                    domain: DecisionDomain::F2lVariant,
+                    kind: DecisionKind::SearchEnd,
+                    depth: 0,
+                    outcome: DecisionOutcome::Failed,
+                    reason: DecisionReason::VariantFailed,
+                    message: error.to_string(),
+                    f2l_pairs: Vec::new(),
+                    algorithm: None,
+                    start_state: None,
+                    state: None,
+                    score: Some(DecisionScore {
+                        beam_width: Some(beam_width),
+                        ..DecisionScore::default()
+                    }),
+                });
                 if first_error.is_none() {
                     first_error = Some(error);
                 }
@@ -1164,14 +1603,68 @@ fn plan_f2l_pairs_until(
             let folded_into_cross =
                 (f2l_pair_mask(&step_start).count_ones() as usize) < required_pairs;
             if !folded_into_cross && step.algorithm.len() > 1 {
+                let original_len = step.algorithm.len();
                 if let Some(candidate) = first_exact_candidate(&exact_budgets, |budget| {
-                    cached_fast_to(step_start, step.end, max_depth, budget, metrics)
+                    cached_fast_to(
+                        step_start,
+                        step.end,
+                        Stage::F2lPair,
+                        max_depth,
+                        budget,
+                        step.decision_id,
+                        metrics,
+                    )
                 }) {
                     if candidate.len() < step.algorithm.len()
                         && step_start.after_algorithm(&candidate) == step.end
                     {
+                        let selected_id = metrics.decisions.record(|index| DecisionRecord {
+                            index,
+                            parent_id: step.decision_id,
+                            stage: Stage::F2lPair,
+                            domain: DecisionDomain::ExactTarget,
+                            kind: DecisionKind::Select,
+                            depth: f2l_pair_mask(&step.end).count_ones() as usize,
+                            outcome: DecisionOutcome::Selected,
+                            reason: DecisionReason::ExactShorter,
+                            message: format!(
+                                "replaced a {original_len}-move F2L transition with an exact {}-move transition",
+                                candidate.len()
+                            ),
+                            f2l_pairs: step.pairs.clone(),
+                            algorithm: Some(candidate.clone()),
+                            start_state: Some(step_start.facelets()),
+                            state: Some(step.end.facelets()),
+                            score: Some(DecisionScore {
+                                path_moves: Some(candidate.len()),
+                                estimated_total: Some(original_len),
+                                solved_pairs: Some(f2l_pair_mask(&step.end).count_ones() as u8),
+                                ..DecisionScore::default()
+                            }),
+                        });
                         step.algorithm = candidate;
                         step.optimized = true;
+                        step.decision_id = selected_id.or(step.decision_id);
+                    } else {
+                        metrics.decisions.record(|index| DecisionRecord {
+                            index,
+                            parent_id: step.decision_id,
+                            stage: Stage::F2lPair,
+                            domain: DecisionDomain::ExactTarget,
+                            kind: DecisionKind::Evaluation,
+                            depth: f2l_pair_mask(&step.end).count_ones() as usize,
+                            outcome: DecisionOutcome::Rejected,
+                            reason: DecisionReason::ExactNotShorter,
+                            message: "kept the original F2L transition because exact search did not shorten it".into(),
+                            f2l_pairs: step.pairs.clone(),
+                            algorithm: Some(candidate),
+                            start_state: Some(step_start.facelets()),
+                            state: Some(step.end.facelets()),
+                            score: Some(DecisionScore {
+                                path_moves: Some(original_len),
+                                ..DecisionScore::default()
+                            }),
+                        });
                     }
                 }
             }
@@ -1192,14 +1685,61 @@ fn plan_f2l_pairs_until(
             metrics,
         ));
     }
-    let mut selected = routes
-        .into_iter()
-        .min_by_key(F2lRoute::move_count)
+    let selected_index = routes
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, route)| route.move_count())
+        .map(|(index, _)| index)
         .ok_or_else(|| {
             first_error.unwrap_or_else(|| {
                 Error::Solver("F2L planner produced no complete pair route".into())
             })
         })?;
+    for (index, route) in routes.iter().enumerate() {
+        if index == selected_index {
+            continue;
+        }
+        metrics.decisions.record(|record_index| DecisionRecord {
+            index: record_index,
+            parent_id: route.decision_id,
+            stage: Stage::F2l,
+            domain: DecisionDomain::F2lVariant,
+            kind: DecisionKind::Backtrack,
+            depth: route.remaining_steps.len(),
+            outcome: DecisionOutcome::Rejected,
+            reason: DecisionReason::HigherTotalMoves,
+            message: "discarded a completed route with a higher total move count".into(),
+            f2l_pairs: Vec::new(),
+            algorithm: None,
+            start_state: None,
+            state: Some(route.cross_end.facelets()),
+            score: Some(DecisionScore {
+                route_moves: Some(route.move_count),
+                ..DecisionScore::default()
+            }),
+        });
+    }
+    let mut selected = routes.remove(selected_index);
+    let selected_id = metrics.decisions.record(|index| DecisionRecord {
+        index,
+        parent_id: selected.decision_id,
+        stage: Stage::F2l,
+        domain: DecisionDomain::F2lVariant,
+        kind: DecisionKind::Select,
+        depth: selected.remaining_steps.len(),
+        outcome: DecisionOutcome::Selected,
+        reason: DecisionReason::LowerTotalMoves,
+        message: "selected the completed CFOP route with the lowest total move count".into(),
+        f2l_pairs: Vec::new(),
+        algorithm: None,
+        start_state: None,
+        state: Some(selected.cross_end.facelets()),
+        score: Some(DecisionScore {
+            route_moves: Some(selected.move_count),
+            ..DecisionScore::default()
+        }),
+    });
+    selected.decision_id = selected_id.or(selected.decision_id);
 
     let planning_micros = micros(started.elapsed().as_micros());
     let timing_share = planning_micros / selected.remaining_steps.len().max(1) as u64;
@@ -1236,14 +1776,76 @@ fn build_f2l_route(
     let mut cross_algorithm = Algorithm::new(cross_moves).simplified();
     let mut cross_optimized = false;
     if required_pairs > 0 {
+        let cross_stage = match required_pairs {
+            1 => Stage::XCross,
+            2 => Stage::XXCross,
+            3 => Stage::XXXCross,
+            _ => Stage::Cross,
+        };
+        let original_len = cross_algorithm.len();
         if let Some(candidate) = first_exact_candidate(exact_budgets, |budget| {
-            cached_fast_to(cross_start, cross_end, max_depth, budget, metrics)
+            cached_fast_to(
+                cross_start,
+                cross_end,
+                cross_stage,
+                max_depth,
+                budget,
+                plan.decision_id,
+                metrics,
+            )
         }) {
             if candidate.len() < cross_algorithm.len()
                 && cross_start.after_algorithm(&candidate) == cross_end
             {
+                let selected_id = metrics.decisions.record(|index| DecisionRecord {
+                    index,
+                    parent_id: plan.decision_id,
+                    stage: cross_stage,
+                    domain: DecisionDomain::ExactTarget,
+                    kind: DecisionKind::Select,
+                    depth: required_pairs,
+                    outcome: DecisionOutcome::Selected,
+                    reason: DecisionReason::ExactShorter,
+                    message: format!(
+                        "replaced a {original_len}-move advanced-cross transition with an exact {}-move transition",
+                        candidate.len()
+                    ),
+                    f2l_pairs: f2l_pairs(f2l_pair_mask(&cross_end)),
+                    algorithm: Some(candidate.clone()),
+                    start_state: Some(cross_start.facelets()),
+                    state: Some(cross_end.facelets()),
+                    score: Some(DecisionScore {
+                        path_moves: Some(candidate.len()),
+                        estimated_total: Some(original_len),
+                        solved_pairs: Some(f2l_pair_mask(&cross_end).count_ones() as u8),
+                        ..DecisionScore::default()
+                    }),
+                });
                 cross_algorithm = candidate;
                 cross_optimized = true;
+                plan.decision_id = selected_id.or(plan.decision_id);
+            } else {
+                metrics.decisions.record(|index| DecisionRecord {
+                    index,
+                    parent_id: plan.decision_id,
+                    stage: cross_stage,
+                    domain: DecisionDomain::ExactTarget,
+                    kind: DecisionKind::Evaluation,
+                    depth: required_pairs,
+                    outcome: DecisionOutcome::Rejected,
+                    reason: DecisionReason::ExactNotShorter,
+                    message:
+                        "kept the advanced-cross transition because exact search did not shorten it"
+                            .into(),
+                    f2l_pairs: f2l_pairs(f2l_pair_mask(&cross_end)),
+                    algorithm: Some(candidate),
+                    start_state: Some(cross_start.facelets()),
+                    state: Some(cross_end.facelets()),
+                    score: Some(DecisionScore {
+                        path_moves: Some(original_len),
+                        ..DecisionScore::default()
+                    }),
+                });
             }
         }
     }
@@ -1254,7 +1856,29 @@ fn build_f2l_route(
         route_moves.extend(step.algorithm.moves().iter().copied());
     }
     route_moves.extend(plan.last_layer.combined.moves().iter().copied());
-    let move_count = Algorithm::new(route_moves).simplified().len();
+    let route_algorithm = Algorithm::new(route_moves).simplified();
+    let move_count = route_algorithm.len();
+    let decision_id = metrics.decisions.record(|index| DecisionRecord {
+        index,
+        parent_id: plan.decision_id,
+        stage: Stage::F2l,
+        domain: DecisionDomain::F2lVariant,
+        kind: DecisionKind::Candidate,
+        depth: plan.steps.len(),
+        outcome: DecisionOutcome::Accepted,
+        reason: DecisionReason::VariantCompleted,
+        message: "assembled a complete cross, F2L, OLL, and PLL route".into(),
+        f2l_pairs: f2l_pairs(f2l_pair_mask(&cross_end)),
+        algorithm: Some(route_algorithm),
+        start_state: Some(cross_start.facelets()),
+        state: Some(plan.last_layer.solved.facelets()),
+        score: Some(DecisionScore {
+            route_moves: Some(move_count),
+            last_layer_moves: Some(plan.last_layer.combined.len()),
+            solved_pairs: Some(f2l_pair_mask(&cross_end).count_ones() as u8),
+            ..DecisionScore::default()
+        }),
+    });
     F2lRoute {
         cross_end,
         cross_algorithm,
@@ -1262,9 +1886,11 @@ fn build_f2l_route(
         remaining_steps,
         last_layer: plan.last_layer,
         move_count,
+        decision_id: decision_id.or(plan.decision_id),
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn beam_f2l_plan(
     cube: Cube,
     strategy: F2lStrategy,
@@ -1272,6 +1898,7 @@ fn beam_f2l_plan(
     single_pair_only: bool,
     beam_width: usize,
     target_pair_count: usize,
+    variant_id: Option<usize>,
     metrics: &mut SearchMetrics,
 ) -> Result<F2lPlan> {
     if target_pair_count != 4 {
@@ -1280,10 +1907,11 @@ fn beam_f2l_plan(
         ));
     }
     if f2l_pair_mask(&cube).count_ones() as usize >= target_pair_count {
-        let last_layer = cached_last_layer_plan(cube, metrics)?;
+        let (last_layer, last_layer_id) = cached_last_layer_plan(cube, variant_id, metrics)?;
         return Ok(F2lPlan {
             steps: Vec::new(),
             last_layer,
+            decision_id: last_layer_id.or(variant_id),
         });
     }
 
@@ -1293,6 +1921,7 @@ fn beam_f2l_plan(
         move_count: 0,
         priority: 0,
         last_layer: None,
+        decision_id: variant_id,
     }];
     let mut complete = Vec::new();
     let mut first_error = None;
@@ -1301,13 +1930,69 @@ fn beam_f2l_plan(
         let mut next = Vec::new();
         for node in frontier {
             let before = f2l_pair_mask(&node.cube);
-            match f2l_candidates(node.cube, strategy, all_aufs, single_pair_only, metrics) {
+            match f2l_candidates(
+                node.cube,
+                strategy,
+                all_aufs,
+                single_pair_only,
+                node.decision_id,
+                metrics,
+            ) {
                 Ok(candidates) => {
                     for candidate in candidates {
                         let after = candidate.end_mask;
                         if after & before != before || after.count_ones() <= before.count_ones() {
+                            metrics.decisions.record(|index| DecisionRecord {
+                                index,
+                                parent_id: node.decision_id,
+                                stage: Stage::F2lPair,
+                                domain: DecisionDomain::F2lBeam,
+                                kind: DecisionKind::Prune,
+                                depth: node.steps.len() + 1,
+                                outcome: DecisionOutcome::Rejected,
+                                reason: DecisionReason::PairRegression,
+                                message: "rejected an F2L candidate that failed to preserve cumulative pair progress".into(),
+                                f2l_pairs: candidate.pairs.clone(),
+                                algorithm: Some(candidate.algorithm.clone()),
+                                start_state: Some(node.cube.facelets()),
+                                state: Some(candidate.end.facelets()),
+                                score: Some(DecisionScore {
+                                    path_moves: Some(node.move_count + candidate.algorithm.len()),
+                                    estimated_total: Some(candidate.estimated_total),
+                                    solved_pairs: Some(after.count_ones() as u8),
+                                    beam_width: Some(beam_width),
+                                    auf: Some(candidate.auf),
+                                    ..DecisionScore::default()
+                                }),
+                            });
                             continue;
                         }
+                        let candidate_id = metrics.decisions.record(|index| DecisionRecord {
+                            index,
+                            parent_id: node.decision_id,
+                            stage: Stage::F2lPair,
+                            domain: DecisionDomain::F2lBeam,
+                            kind: DecisionKind::Candidate,
+                            depth: node.steps.len() + 1,
+                            outcome: DecisionOutcome::Accepted,
+                            reason: DecisionReason::PairProgress,
+                            message: format!(
+                                "accepted an F2L candidate that increased the solved-pair count to {}",
+                                after.count_ones()
+                            ),
+                            f2l_pairs: candidate.pairs.clone(),
+                            algorithm: Some(candidate.algorithm.clone()),
+                            start_state: Some(node.cube.facelets()),
+                            state: Some(candidate.end.facelets()),
+                            score: Some(DecisionScore {
+                                path_moves: Some(node.move_count + candidate.algorithm.len()),
+                                estimated_total: Some(candidate.estimated_total),
+                                solved_pairs: Some(after.count_ones() as u8),
+                                beam_width: Some(beam_width),
+                                auf: Some(candidate.auf),
+                                ..DecisionScore::default()
+                            }),
+                        });
                         let step = F2lStep {
                             end: candidate.end,
                             algorithm: candidate.algorithm,
@@ -1315,6 +2000,7 @@ fn beam_f2l_plan(
                             elapsed_micros: 0,
                             repaired: candidate.repaired,
                             optimized: false,
+                            decision_id: candidate_id.or(node.decision_id),
                         };
                         let move_count = node.move_count + step.algorithm.len();
                         let mut steps = node.steps.clone();
@@ -1325,6 +2011,7 @@ fn beam_f2l_plan(
                             move_count,
                             priority: node.move_count + candidate.estimated_total,
                             last_layer: None,
+                            decision_id: candidate_id.or(node.decision_id),
                         };
                         if after.count_ones() as usize >= target_pair_count {
                             complete.push(expanded);
@@ -1345,17 +2032,122 @@ fn beam_f2l_plan(
         }
         next.sort_by_key(|node| (node.priority, node.move_count));
         let mut states = HashSet::new();
-        next.retain(|node| states.insert(CubeKey::from(node.cube)));
-        next.truncate(beam_width);
-        frontier = next;
+        let mut unique = Vec::with_capacity(next.len());
+        for node in next {
+            if states.insert(CubeKey::from(node.cube)) {
+                unique.push(node);
+            } else {
+                metrics.decisions.record(|index| DecisionRecord {
+                    index,
+                    parent_id: node.decision_id,
+                    stage: Stage::F2lPair,
+                    domain: DecisionDomain::F2lBeam,
+                    kind: DecisionKind::Prune,
+                    depth: node.steps.len(),
+                    outcome: DecisionOutcome::Pruned,
+                    reason: DecisionReason::DuplicateState,
+                    message: "pruned a beam node whose cube state was already represented".into(),
+                    f2l_pairs: node
+                        .steps
+                        .last()
+                        .map_or_else(Vec::new, |step| step.pairs.clone()),
+                    algorithm: node.steps.last().map(|step| step.algorithm.clone()),
+                    start_state: Some(
+                        node.steps
+                            .len()
+                            .checked_sub(2)
+                            .and_then(|index| node.steps.get(index))
+                            .map_or(cube, |step| step.end)
+                            .facelets(),
+                    ),
+                    state: Some(node.cube.facelets()),
+                    score: Some(DecisionScore {
+                        path_moves: Some(node.move_count),
+                        estimated_total: Some(node.priority),
+                        solved_pairs: Some(f2l_pair_mask(&node.cube).count_ones() as u8),
+                        beam_width: Some(beam_width),
+                        ..DecisionScore::default()
+                    }),
+                });
+            }
+        }
+        if unique.len() > beam_width {
+            for node in &unique[beam_width..] {
+                metrics.decisions.record(|index| DecisionRecord {
+                    index,
+                    parent_id: node.decision_id,
+                    stage: Stage::F2lPair,
+                    domain: DecisionDomain::F2lBeam,
+                    kind: DecisionKind::Prune,
+                    depth: node.steps.len(),
+                    outcome: DecisionOutcome::Pruned,
+                    reason: DecisionReason::BeamWidth,
+                    message: "pruned a valid F2L node outside the configured beam width".into(),
+                    f2l_pairs: node
+                        .steps
+                        .last()
+                        .map_or_else(Vec::new, |step| step.pairs.clone()),
+                    algorithm: node.steps.last().map(|step| step.algorithm.clone()),
+                    start_state: Some(
+                        node.steps
+                            .len()
+                            .checked_sub(2)
+                            .and_then(|index| node.steps.get(index))
+                            .map_or(cube, |step| step.end)
+                            .facelets(),
+                    ),
+                    state: Some(node.cube.facelets()),
+                    score: Some(DecisionScore {
+                        path_moves: Some(node.move_count),
+                        estimated_total: Some(node.priority),
+                        solved_pairs: Some(f2l_pair_mask(&node.cube).count_ones() as u8),
+                        beam_width: Some(beam_width),
+                        ..DecisionScore::default()
+                    }),
+                });
+            }
+            unique.truncate(beam_width);
+        }
+        frontier = unique;
     }
 
     complete.sort_by_key(|node| node.move_count);
     let mut terminal_states = HashSet::new();
-    complete.retain(|node| terminal_states.insert(CubeKey::from(node.cube)));
-    for node in &mut complete {
-        match cached_last_layer_plan(node.cube, metrics) {
-            Ok(plan) => node.last_layer = Some(plan),
+    let mut unique_complete = Vec::with_capacity(complete.len());
+    for node in complete {
+        if terminal_states.insert(CubeKey::from(node.cube)) {
+            unique_complete.push(node);
+        } else {
+            metrics.decisions.record(|index| DecisionRecord {
+                index,
+                parent_id: node.decision_id,
+                stage: Stage::F2l,
+                domain: DecisionDomain::F2lBeam,
+                kind: DecisionKind::Prune,
+                depth: node.steps.len(),
+                outcome: DecisionOutcome::Pruned,
+                reason: DecisionReason::DuplicateState,
+                message: "pruned a duplicate terminal F2L state".into(),
+                f2l_pairs: Vec::new(),
+                algorithm: None,
+                start_state: None,
+                state: Some(node.cube.facelets()),
+                score: Some(DecisionScore {
+                    path_moves: Some(node.move_count),
+                    solved_pairs: Some(f2l_pair_mask(&node.cube).count_ones() as u8),
+                    ..DecisionScore::default()
+                }),
+            });
+        }
+    }
+    let mut complete = Vec::with_capacity(unique_complete.len());
+    for mut node in unique_complete {
+        match cached_last_layer_plan(node.cube, node.decision_id, metrics) {
+            Ok((plan, decision_id)) => {
+                node.last_layer = Some(plan);
+                node.decision_id = decision_id.or(node.decision_id);
+                complete.push(node);
+            }
             Err(error) => {
                 if first_error.is_none() {
                     first_error = Some(error);
@@ -1363,11 +2155,10 @@ fn beam_f2l_plan(
             }
         }
     }
-    complete.retain(|node| node.last_layer.is_some());
-
-    complete
-        .into_iter()
-        .min_by_key(|node| {
+    let selected_index = complete
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, node)| {
             (
                 node.move_count
                     + node
@@ -1377,28 +2168,149 @@ fn beam_f2l_plan(
                 node.move_count,
             )
         })
-        .map(|node| F2lPlan {
-            steps: node.steps,
-            last_layer: node
-                .last_layer
-                .expect("complete F2L nodes have a last-layer plan"),
-        })
+        .map(|(index, _)| index)
         .ok_or_else(|| {
             first_error.unwrap_or_else(|| {
                 Error::Solver("F2L beam search did not reach the requested pair count".into())
             })
-        })
+        })?;
+    for (index, node) in complete.iter().enumerate() {
+        if index == selected_index {
+            continue;
+        }
+        let last_layer_moves = node
+            .last_layer
+            .as_ref()
+            .map_or(0, |plan| plan.combined.len());
+        metrics.decisions.record(|record_index| DecisionRecord {
+            index: record_index,
+            parent_id: node.decision_id,
+            stage: Stage::F2l,
+            domain: DecisionDomain::F2lBeam,
+            kind: DecisionKind::Backtrack,
+            depth: node.steps.len(),
+            outcome: DecisionOutcome::Rejected,
+            reason: DecisionReason::HigherTotalMoves,
+            message: "backtracked from a complete F2L branch with a higher projected total".into(),
+            f2l_pairs: Vec::new(),
+            algorithm: None,
+            start_state: None,
+            state: Some(node.cube.facelets()),
+            score: Some(DecisionScore {
+                path_moves: Some(node.move_count),
+                last_layer_moves: Some(last_layer_moves),
+                estimated_total: Some(node.move_count + last_layer_moves),
+                solved_pairs: Some(f2l_pair_mask(&node.cube).count_ones() as u8),
+                ..DecisionScore::default()
+            }),
+        });
+    }
+    let node = complete.remove(selected_index);
+    let last_layer = node
+        .last_layer
+        .expect("complete F2L nodes have a last-layer plan");
+    let selection_id = metrics.decisions.record(|index| DecisionRecord {
+        index,
+        parent_id: node.decision_id,
+        stage: Stage::F2l,
+        domain: DecisionDomain::F2lBeam,
+        kind: DecisionKind::Select,
+        depth: node.steps.len(),
+        outcome: DecisionOutcome::Selected,
+        reason: DecisionReason::LowerTotalMoves,
+        message: "selected the complete F2L branch with the lowest F2L plus last-layer total"
+            .into(),
+        f2l_pairs: Vec::new(),
+        algorithm: None,
+        start_state: None,
+        state: Some(node.cube.facelets()),
+        score: Some(DecisionScore {
+            path_moves: Some(node.move_count),
+            last_layer_moves: Some(last_layer.combined.len()),
+            estimated_total: Some(node.move_count + last_layer.combined.len()),
+            solved_pairs: Some(f2l_pair_mask(&node.cube).count_ones() as u8),
+            ..DecisionScore::default()
+        }),
+    });
+    Ok(F2lPlan {
+        steps: node.steps,
+        last_layer,
+        decision_id: selection_id.or(node.decision_id),
+    })
 }
 
-fn cached_last_layer_plan(cube: Cube, metrics: &mut SearchMetrics) -> Result<LastLayerPlan> {
+fn cached_last_layer_plan(
+    cube: Cube,
+    parent_id: Option<usize>,
+    metrics: &mut SearchMetrics,
+) -> Result<(LastLayerPlan, Option<usize>)> {
     let key = CubeKey::from(cube);
-    if let Some(plan) = metrics.last_layer_cache.get(&key) {
-        return Ok(plan.clone());
+    if let Some(plan) = metrics.last_layer_cache.get(&key).cloned() {
+        let decision_id = metrics.decisions.record(|index| DecisionRecord {
+            index,
+            parent_id,
+            stage: Stage::LastLayer,
+            domain: DecisionDomain::LastLayer,
+            kind: DecisionKind::CacheHit,
+            depth: 0,
+            outcome: DecisionOutcome::Cached,
+            reason: DecisionReason::CacheHit,
+            message: "reused a cached OLL and PLL evaluation for this terminal F2L state".into(),
+            f2l_pairs: Vec::new(),
+            algorithm: Some(plan.combined.clone()),
+            start_state: Some(cube.facelets()),
+            state: Some(plan.solved.facelets()),
+            score: Some(DecisionScore {
+                last_layer_moves: Some(plan.combined.len()),
+                ..DecisionScore::default()
+            }),
+        });
+        return Ok((plan, decision_id.or(parent_id)));
     }
     metrics.last_layer_evaluations += 1;
-    let plan = LAST_LAYER_EVALUATOR.with(|evaluator| evaluator.borrow_mut().evaluate(cube))?;
+    let plan = match LAST_LAYER_EVALUATOR.with(|evaluator| evaluator.borrow_mut().evaluate(cube)) {
+        Ok(plan) => plan,
+        Err(error) => {
+            metrics.decisions.record(|index| DecisionRecord {
+                index,
+                parent_id,
+                stage: Stage::LastLayer,
+                domain: DecisionDomain::LastLayer,
+                kind: DecisionKind::Evaluation,
+                depth: 0,
+                outcome: DecisionOutcome::Failed,
+                reason: DecisionReason::VariantFailed,
+                message: error.to_string(),
+                f2l_pairs: Vec::new(),
+                algorithm: None,
+                start_state: None,
+                state: Some(cube.facelets()),
+                score: None,
+            });
+            return Err(error);
+        }
+    };
+    let decision_id = metrics.decisions.record(|index| DecisionRecord {
+        index,
+        parent_id,
+        stage: Stage::LastLayer,
+        domain: DecisionDomain::LastLayer,
+        kind: DecisionKind::Evaluation,
+        depth: 0,
+        outcome: DecisionOutcome::Accepted,
+        reason: DecisionReason::LastLayerSolved,
+        message: "evaluated OLL and PLL for a complete F2L candidate".into(),
+        f2l_pairs: Vec::new(),
+        algorithm: Some(plan.combined.clone()),
+        start_state: Some(cube.facelets()),
+        state: Some(plan.solved.facelets()),
+        score: Some(DecisionScore {
+            last_layer_moves: Some(plan.combined.len()),
+            ..DecisionScore::default()
+        }),
+    });
     metrics.last_layer_cache.insert(key, plan.clone());
-    Ok(plan)
+    Ok((plan, decision_id.or(parent_id)))
 }
 
 fn f2l_candidates(
@@ -1406,6 +2318,7 @@ fn f2l_candidates(
     strategy: F2lStrategy,
     all_aufs: bool,
     single_pair_only: bool,
+    parent_id: Option<usize>,
     metrics: &mut SearchMetrics,
 ) -> Result<Vec<F2lCandidate>> {
     let auf_count = if strategy == F2lStrategy::Lookahead && all_aufs {
@@ -1416,9 +2329,30 @@ fn f2l_candidates(
     let mut candidates = Vec::with_capacity(auf_count);
     let mut first_error = None;
     for auf in 0..auf_count {
-        match cached_f2l_candidate(cube, auf as u8, !single_pair_only, metrics) {
+        match cached_f2l_candidate(cube, auf as u8, !single_pair_only, parent_id, metrics) {
             Ok(Some(candidate)) => candidates.push(candidate),
-            Ok(None) => {}
+            Ok(None) => {
+                metrics.decisions.record(|index| DecisionRecord {
+                    index,
+                    parent_id,
+                    stage: Stage::F2lPair,
+                    domain: DecisionDomain::F2lBeam,
+                    kind: DecisionKind::Prune,
+                    depth: f2l_pair_mask(&cube).count_ones() as usize + 1,
+                    outcome: DecisionOutcome::Rejected,
+                    reason: DecisionReason::NoPairProgress,
+                    message: format!("AUF {auf} produced no cumulative F2L pair transition"),
+                    f2l_pairs: Vec::new(),
+                    algorithm: None,
+                    start_state: None,
+                    state: None,
+                    score: Some(DecisionScore {
+                        solved_pairs: Some(f2l_pair_mask(&cube).count_ones() as u8),
+                        auf: Some(auf as u8),
+                        ..DecisionScore::default()
+                    }),
+                });
+            }
             Err(error) => {
                 if first_error.is_none() {
                     first_error = Some(error);
@@ -1428,7 +2362,33 @@ fn f2l_candidates(
     }
     candidates.sort_by_key(|candidate| (candidate.estimated_total, candidate.algorithm.len()));
     let mut states = HashSet::new();
-    candidates.retain(|candidate| states.insert(CubeKey::from(candidate.end)));
+    candidates.retain(|candidate| {
+        let unique = states.insert(CubeKey::from(candidate.end));
+        if !unique {
+            metrics.decisions.record(|index| DecisionRecord {
+                index,
+                parent_id,
+                stage: Stage::F2lPair,
+                domain: DecisionDomain::F2lBeam,
+                kind: DecisionKind::Prune,
+                depth: f2l_pair_mask(&candidate.end).count_ones() as usize,
+                outcome: DecisionOutcome::Pruned,
+                reason: DecisionReason::DuplicateState,
+                message: "pruned an AUF candidate that reached a duplicate cube state".into(),
+                f2l_pairs: candidate.pairs.clone(),
+                algorithm: Some(candidate.algorithm.clone()),
+                start_state: Some(cube.facelets()),
+                state: Some(candidate.end.facelets()),
+                score: Some(DecisionScore {
+                    estimated_total: Some(candidate.estimated_total),
+                    solved_pairs: Some(candidate.end_mask.count_ones() as u8),
+                    auf: Some(candidate.auf),
+                    ..DecisionScore::default()
+                }),
+            });
+        }
+        unique
+    });
     if candidates.is_empty() {
         Err(first_error.unwrap_or_else(|| {
             Error::Solver("F2L engine produced no cumulative pair transition".into())
@@ -1442,11 +2402,41 @@ fn cached_f2l_candidate(
     cube: Cube,
     auf: u8,
     full_estimate: bool,
+    parent_id: Option<usize>,
     metrics: &mut SearchMetrics,
 ) -> Result<Option<F2lCandidate>> {
     let key = (CubeKey::from(cube), auf, full_estimate);
-    if let Some(candidate) = metrics.f2l_cache.get(&key) {
-        return Ok(candidate.clone());
+    if let Some(candidate) = metrics.f2l_cache.get(&key).cloned() {
+        metrics.decisions.record(|index| DecisionRecord {
+            index,
+            parent_id,
+            stage: Stage::F2lPair,
+            domain: DecisionDomain::F2lBeam,
+            kind: DecisionKind::CacheHit,
+            depth: f2l_pair_mask(&cube).count_ones() as usize + 1,
+            outcome: DecisionOutcome::Cached,
+            reason: DecisionReason::CacheHit,
+            message: format!("reused the cached F2L candidate for AUF {auf}"),
+            f2l_pairs: candidate
+                .as_ref()
+                .map_or_else(Vec::new, |candidate| candidate.pairs.clone()),
+            algorithm: candidate
+                .as_ref()
+                .map(|candidate| candidate.algorithm.clone()),
+            start_state: candidate.as_ref().map(|_| cube.facelets()),
+            state: candidate.as_ref().map(|candidate| candidate.end.facelets()),
+            score: Some(DecisionScore {
+                estimated_total: candidate
+                    .as_ref()
+                    .map(|candidate| candidate.estimated_total),
+                solved_pairs: candidate
+                    .as_ref()
+                    .map(|candidate| candidate.end_mask.count_ones() as u8),
+                auf: Some(auf),
+                ..DecisionScore::default()
+            }),
+        });
+        return Ok(candidate);
     }
     metrics.f2l_candidates_evaluated += 1;
     let candidate = f2l_candidate(cube, auf, full_estimate)?;
@@ -1493,6 +2483,7 @@ fn f2l_candidate(cube: Cube, auf: u8, full_estimate: bool) -> Result<Option<F2lC
                 pairs: f2l_pairs(after & !before),
                 estimated_total,
                 repaired,
+                auf,
             };
             if gained == 1 {
                 return Ok(Some(candidate));
@@ -1506,27 +2497,11 @@ fn f2l_candidate(cube: Cube, auf: u8, full_estimate: bool) -> Result<Option<F2lC
 }
 
 fn f2l_pair_mask(cube: &Cube) -> u8 {
-    let solved = SOLVED_CUBIE_CUBE;
-    let mut mask = 0u8;
-    for (bit, corner, edge) in [(0, 4, 8), (1, 5, 9), (2, 6, 10), (3, 7, 11)] {
-        if cube.inner.cp[corner] == solved.cp[corner]
-            && cube.inner.co[corner] == 0
-            && cube.inner.ep[edge] == solved.ep[edge]
-            && cube.inner.eo[edge] == 0
-        {
-            mask |= 1 << bit;
-        }
-    }
-    mask
+    crate::features::solved_f2l_pair_mask(cube)
 }
 
 fn f2l_pairs(mask: u8) -> Vec<F2lPair> {
-    [F2lPair::Fr, F2lPair::Fl, F2lPair::Bl, F2lPair::Br]
-        .iter()
-        .copied()
-        .enumerate()
-        .filter_map(|(index, pair)| (mask & (1 << index) != 0).then_some(pair))
-        .collect()
+    crate::features::f2l_pairs(mask)
 }
 
 fn format_pairs(pairs: &[F2lPair]) -> String {
@@ -1582,6 +2557,7 @@ fn run_cfop_stage(stage: Stage, cube: Cube) -> Result<(Cube, Algorithm, bool)> {
         | Stage::XXCross
         | Stage::XXXCross
         | Stage::F2lPair
+        | Stage::LastLayer
         | Stage::Fast => unreachable!(),
         Stage::Cross => {
             let mut solver = CrossSolver { cube: cube.inner };
@@ -1710,7 +2686,7 @@ fn stage_is_solved(stage: Stage, cube: &Cube) -> bool {
                     && cube.inner.eo[index] == 0
             })
         }
-        Stage::Pll => cube.is_canonically_solved(),
+        Stage::Pll | Stage::LastLayer => cube.is_canonically_solved(),
         Stage::Fast => cube.is_solved(),
     }
 }
@@ -1756,8 +2732,10 @@ fn fast_to(from: &Cube, goal: &Cube, max_depth: usize, probe_limit: u64) -> Resu
 fn cached_fast_to(
     from: Cube,
     goal: Cube,
+    stage: Stage,
     max_depth: usize,
     probe_limit: u64,
+    parent_id: Option<usize>,
     metrics: &mut SearchMetrics,
 ) -> Option<Algorithm> {
     let key = ExactSearchKey {
@@ -1766,11 +2744,66 @@ fn cached_fast_to(
         max_depth,
         probe_limit,
     };
-    if let Some(candidate) = metrics.exact_cache.get(&key) {
-        return candidate.clone();
+    if let Some(candidate) = metrics.exact_cache.get(&key).cloned() {
+        metrics.decisions.record(|index| DecisionRecord {
+            index,
+            parent_id,
+            stage,
+            domain: DecisionDomain::ExactTarget,
+            kind: DecisionKind::CacheHit,
+            depth: f2l_pair_mask(&goal).count_ones() as usize,
+            outcome: DecisionOutcome::Cached,
+            reason: DecisionReason::CacheHit,
+            message: "reused the result of an exact-target search".into(),
+            f2l_pairs: f2l_pairs(f2l_pair_mask(&goal) & !f2l_pair_mask(&from)),
+            algorithm: candidate.clone(),
+            start_state: candidate.as_ref().map(|_| from.facelets()),
+            state: Some(goal.facelets()),
+            score: Some(DecisionScore {
+                path_moves: candidate.as_ref().map(Algorithm::len),
+                solved_pairs: Some(f2l_pair_mask(&goal).count_ones() as u8),
+                probe_limit: Some(probe_limit),
+                ..DecisionScore::default()
+            }),
+        });
+        return candidate;
     }
     metrics.exact_target_searches += 1;
-    let candidate = fast_to(&from, &goal, max_depth, probe_limit).ok();
+    let result = fast_to(&from, &goal, max_depth, probe_limit);
+    let candidate = result.ok();
+    metrics.decisions.record(|index| DecisionRecord {
+        index,
+        parent_id,
+        stage,
+        domain: DecisionDomain::ExactTarget,
+        kind: DecisionKind::Evaluation,
+        depth: f2l_pair_mask(&goal).count_ones() as usize,
+        outcome: if candidate.is_some() {
+            DecisionOutcome::Accepted
+        } else {
+            DecisionOutcome::Failed
+        },
+        reason: if candidate.is_some() {
+            DecisionReason::ExactFound
+        } else {
+            DecisionReason::ExactUnavailable
+        },
+        message: if candidate.is_some() {
+            "exact-target search found a replayable transition".into()
+        } else {
+            "exact-target search found no transition within this probe budget".into()
+        },
+        f2l_pairs: f2l_pairs(f2l_pair_mask(&goal) & !f2l_pair_mask(&from)),
+        algorithm: candidate.clone(),
+        start_state: candidate.as_ref().map(|_| from.facelets()),
+        state: Some(goal.facelets()),
+        score: Some(DecisionScore {
+            path_moves: candidate.as_ref().map(Algorithm::len),
+            solved_pairs: Some(f2l_pair_mask(&goal).count_ones() as u8),
+            probe_limit: Some(probe_limit),
+            ..DecisionScore::default()
+        }),
+    });
     metrics.exact_cache.insert(key, candidate.clone());
     candidate
 }
@@ -1902,7 +2935,9 @@ fn stage_score(stage: Stage, cube: &Cube) -> u16 {
             (cross + f2l_corners + f2l_edges) as u16
         }
         Stage::Oll => (cross + f2l_corners + f2l_edges + oriented) as u16,
-        Stage::Pll | Stage::Fast => (cross + f2l_corners + f2l_edges + oriented + permuted) as u16,
+        Stage::Pll | Stage::LastLayer | Stage::Fast => {
+            (cross + f2l_corners + f2l_edges + oriented + permuted) as u16
+        }
     }
 }
 
@@ -1926,6 +2961,10 @@ fn decision_message(stage: Stage, algorithm: &Algorithm) -> String {
         ),
         Stage::Pll => format!(
             "recognized the PLL permutation and finished in {} moves",
+            algorithm.len()
+        ),
+        Stage::LastLayer => format!(
+            "selected a combined last-layer finish in {} moves",
             algorithm.len()
         ),
         Stage::Fast => format!("selected a {}-move two-phase solution", algorithm.len()),
@@ -1997,5 +3036,144 @@ mod tests {
         });
         assert!(result.is_some());
         assert_eq!(visited, [100, 500]);
+    }
+
+    #[test]
+    fn decisions_are_default_disabled_and_absent_from_json() {
+        let result = Solver::new(SolveConfig::default())
+            .solve(&Cube::solved())
+            .unwrap();
+        assert!(result.decisions.is_none());
+        let encoded = serde_json::to_value(result).unwrap();
+        assert!(encoded.get("decisions").is_none());
+    }
+
+    #[test]
+    fn decision_records_are_real_replayable_and_deterministic() {
+        let config = SolveConfig {
+            decisions: true,
+            max_decision_records: 2_048,
+            ..SolveConfig::default()
+        };
+        let cube = Cube::from_scramble("R U F").unwrap();
+        let first = Solver::new(config.clone()).solve(&cube).unwrap();
+        let second = Solver::new(config).solve(&cube).unwrap();
+        let first_trace = first.decisions.as_ref().unwrap();
+        let second_trace = second.decisions.as_ref().unwrap();
+
+        assert_eq!(first_trace.schema, DECISION_TRACE_SCHEMA);
+        assert!(!first_trace.records.is_empty());
+        assert_eq!(
+            serde_json::to_value(first_trace).unwrap(),
+            serde_json::to_value(second_trace).unwrap()
+        );
+        for (index, record) in first_trace.records.iter().enumerate() {
+            assert_eq!(record.index, index);
+            if let Some(parent_id) = record.parent_id {
+                assert!(parent_id < record.index);
+            }
+        }
+        assert!(first_trace
+            .records
+            .iter()
+            .any(|record| record.domain == DecisionDomain::LastLayer));
+        assert!(first_trace
+            .records
+            .iter()
+            .any(|record| record.domain == DecisionDomain::Phase));
+
+        let candidate = first_trace
+            .records
+            .iter()
+            .find(|record| {
+                record.domain == DecisionDomain::F2lBeam
+                    && record.kind == DecisionKind::Candidate
+                    && record.parent_id.is_some()
+                    && record.algorithm.is_some()
+                    && record.start_state.is_some()
+                    && record.state.is_some()
+            })
+            .expect("F2L search should emit a real candidate transition");
+        let replayed = Cube::from_facelets(candidate.start_state.as_deref().unwrap())
+            .unwrap()
+            .after_algorithm(candidate.algorithm.as_ref().unwrap());
+        assert_eq!(replayed.facelets(), candidate.state.as_deref().unwrap());
+
+        for record in &first_trace.records {
+            if let Some(algorithm) = &record.algorithm {
+                let start = record
+                    .start_state
+                    .as_deref()
+                    .expect("every decision carrying moves must carry its replay origin");
+                let end = record
+                    .state
+                    .as_deref()
+                    .expect("every decision carrying moves must carry its endpoint");
+                assert_eq!(
+                    Cube::from_facelets(start)
+                        .unwrap()
+                        .after_algorithm(algorithm)
+                        .facelets(),
+                    end,
+                    "decision {} is not replayable",
+                    record.index
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn decision_record_cap_truncates_observation_not_search() {
+        let cube = Cube::from_scramble("R U F").unwrap();
+        let result = Solver::new(SolveConfig {
+            decisions: true,
+            max_decision_records: 4,
+            ..SolveConfig::default()
+        })
+        .solve(&cube)
+        .unwrap();
+        assert!(result.verified);
+        let trace = result.decisions.unwrap();
+        assert_eq!(trace.records.len(), 4);
+        assert!(trace.truncated);
+        assert!(trace.dropped_records > 0);
+        assert!(trace
+            .records
+            .iter()
+            .any(|record| record.kind == DecisionKind::Select));
+        assert_eq!(
+            trace
+                .records
+                .iter()
+                .filter(|record| record.domain == DecisionDomain::Phase)
+                .next_back()
+                .map(|record| record.stage),
+            Some(Stage::Pll)
+        );
+        assert_eq!(
+            trace
+                .records
+                .iter()
+                .filter(|record| {
+                    record.domain != DecisionDomain::Phase
+                        && matches!(record.kind, DecisionKind::Select | DecisionKind::SearchEnd)
+                })
+                .next_back()
+                .map(|record| (&record.kind, record.stage)),
+            Some((&DecisionKind::Select, Stage::F2l))
+        );
+        let retained_ids = trace
+            .records
+            .iter()
+            .map(|record| record.index)
+            .collect::<HashSet<_>>();
+        assert!(trace
+            .records
+            .windows(2)
+            .all(|pair| pair[0].index < pair[1].index));
+        assert!(trace.records.iter().all(|record| record
+            .parent_id
+            .map_or(true, |parent| parent < record.index
+                && retained_ids.contains(&parent))));
     }
 }

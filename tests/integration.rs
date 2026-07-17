@@ -1,7 +1,9 @@
 use std::collections::HashSet;
 
 use cfop_solver::{
-    CrossMode, Cube, Efficiency, F2lStrategy, SolveConfig, SolveMethod, Solver, Stage, TraceEvent,
+    Algorithm, CrossMode, Cube, Efficiency, F2lStrategy, PhaseBoundary, PhaseInvariantStatus,
+    SolveConfig, SolveMethod, Solver, Stage, TraceEvent, TrainingVerifier, VerificationConfig,
+    VerificationInput,
 };
 
 #[test]
@@ -419,4 +421,45 @@ fn assert_trace_moves_are_attached(trace: &[TraceEvent]) {
             assert!(event.get("algorithm").is_none());
         }
     }
+}
+
+#[test]
+fn training_verifier_accepts_real_cfop_stage_boundaries() {
+    let cube = Cube::from_scramble("D R2 B2 L2 F L B' R' L D F U' B2 D' L R2 F2 L2 F' B'").unwrap();
+    let result = Solver::new(SolveConfig {
+        cross_mode: CrossMode::XXCross,
+        efficiency: Efficiency::Thorough,
+        ..SolveConfig::default()
+    })
+    .solve(&cube)
+    .unwrap();
+
+    let mut moves = Vec::new();
+    let mut boundaries = Vec::new();
+    for stage in &result.stages {
+        moves.extend(stage.algorithm.moves().iter().copied());
+        boundaries.push(PhaseBoundary {
+            stage: stage.stage,
+            after_move: moves.len(),
+            f2l_pairs: stage.f2l_pairs.clone(),
+        });
+    }
+    let input = VerificationInput {
+        id: Some("real-cfop".into()),
+        state: cube.facelets(),
+        moves: Algorithm::new(moves).to_string(),
+        known_solutions: vec![result.solution.to_string()],
+        phase_boundaries: boundaries,
+    };
+    let verified = TrainingVerifier::new(VerificationConfig::default())
+        .unwrap()
+        .verify(&input);
+    assert!(verified.parse.valid);
+    assert!(verified.solved);
+    assert_eq!(
+        verified.phase_invariants.status,
+        PhaseInvariantStatus::Passed
+    );
+    assert!(verified.phase_invariants.first_violation.is_none());
+    assert_eq!(verified.known_solutions.verified, 1);
 }

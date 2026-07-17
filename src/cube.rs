@@ -1,6 +1,9 @@
 use std::{fmt, str::FromStr};
 
-use std::collections::{HashSet, VecDeque};
+use std::{
+    collections::{HashSet, VecDeque},
+    sync::OnceLock,
+};
 
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
@@ -304,7 +307,7 @@ fn cubies_from_facelets(face: &FaceCube) -> Result<CubieCube> {
     Ok(inner)
 }
 
-fn facelets_from_cubies(inner: &CubieCube) -> FaceCube {
+pub(crate) fn facelets_from_cubies(inner: &CubieCube) -> FaceCube {
     let mut face = FaceCube::default();
     for (position, facelet) in CENTER_FACELET.iter().enumerate() {
         face.f[*facelet as usize] = inner.center[position];
@@ -327,20 +330,25 @@ fn facelets_from_cubies(inner: &CubieCube) -> FaceCube {
 }
 
 fn valid_center_frame(center: [Color; 6]) -> bool {
-    let mut seen = HashSet::new();
-    let mut pending = VecDeque::new();
-    let solved = CubieCube::default();
-    seen.insert(solved.center);
-    pending.push_back(solved);
-    while let Some(cube) = pending.pop_front() {
-        for rotation in [EngineMove::x, EngineMove::y, EngineMove::z] {
-            let next = cube.apply_move(rotation);
-            if seen.insert(next.center) {
-                pending.push_back(next);
+    static FRAMES: OnceLock<HashSet<[Color; 6]>> = OnceLock::new();
+    FRAMES
+        .get_or_init(|| {
+            let mut seen = HashSet::new();
+            let mut pending = VecDeque::new();
+            let solved = CubieCube::default();
+            seen.insert(solved.center);
+            pending.push_back(solved);
+            while let Some(cube) = pending.pop_front() {
+                for rotation in [EngineMove::x, EngineMove::y, EngineMove::z] {
+                    let next = cube.apply_move(rotation);
+                    if seen.insert(next.center) {
+                        pending.push_back(next);
+                    }
+                }
             }
-        }
-    }
-    seen.contains(&center)
+            seen
+        })
+        .contains(&center)
 }
 
 fn permutation_parity(values: &[usize]) -> u8 {

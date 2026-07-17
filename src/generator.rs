@@ -10,11 +10,13 @@ use rayon::{prelude::*, ThreadPool, ThreadPoolBuilder};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Algorithm, CrossMode, Cube, Efficiency, Error, ExplorationEvent, F2lStrategy, Result,
-    SolveConfig, SolveMethod, SolveStats, Solver, StageResult, TraceEvent,
+    Algorithm, CrossMode, Cube, CubeFeatures, DecisionTrace, Efficiency, Error, ExplorationEvent,
+    F2lStrategy, FeatureSelection, Result, SolveConfig, SolveMethod, SolveStats, Solver,
+    StageResult, TraceEvent,
 };
 
 pub const DATASET_SCHEMA: &str = "cfop-dataset/v3";
+pub const DATASET_SCHEMA_EXTENDED: &str = "cfop-dataset/v4";
 pub const STATE_FORMAT: &str = "facelets-urfdlb-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,6 +61,11 @@ pub struct GenerateConfig {
     pub trace: bool,
     pub exploration: bool,
     pub max_exploration_states: usize,
+    /// Include the actual bounded search-decision stream on the primary solution.
+    pub decisions: bool,
+    pub max_decision_records: usize,
+    /// Optional numeric representation attached once per generated cube.
+    pub features: FeatureSelection,
     /// Zero uses the machine's available parallelism.
     pub threads: usize,
 }
@@ -80,6 +87,9 @@ impl Default for GenerateConfig {
             trace: false,
             exploration: false,
             max_exploration_states: 72,
+            decisions: false,
+            max_decision_records: 512,
+            features: FeatureSelection::None,
             threads: 0,
         }
     }
@@ -105,6 +115,8 @@ pub struct GeneratedSolution {
     pub trace: Vec<TraceEvent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exploration: Vec<ExplorationEvent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decisions: Option<DecisionTrace>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,6 +130,8 @@ pub struct GeneratedSample {
     pub scramble: Algorithm,
     pub scramble_move_count: usize,
     pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub features: Option<CubeFeatures>,
     pub solutions: Vec<GeneratedSolution>,
 }
 
@@ -210,6 +224,8 @@ fn generate_one(config: &GenerateConfig, index: usize) -> Result<GeneratedSample
         trace: config.trace,
         exploration: config.exploration,
         max_exploration_states: config.max_exploration_states,
+        decisions: config.decisions,
+        max_decision_records: config.max_decision_records,
         max_depth: config.max_depth,
         probe_limit: config.probe_limit,
         // A generated record already has a second genuine solution available:
@@ -240,6 +256,7 @@ fn generate_one(config: &GenerateConfig, index: usize) -> Result<GeneratedSample
         stages: primary_stages,
         trace: result.trace,
         exploration: result.exploration,
+        decisions: result.decisions,
     });
 
     if solutions.len() < config.solutions_per_scramble {
@@ -259,6 +276,7 @@ fn generate_one(config: &GenerateConfig, index: usize) -> Result<GeneratedSample
                 stages: Vec::new(),
                 trace: Vec::new(),
                 exploration: Vec::new(),
+                decisions: None,
             },
         );
     }
@@ -278,6 +296,7 @@ fn generate_one(config: &GenerateConfig, index: usize) -> Result<GeneratedSample
                 stages: Vec::new(),
                 trace: Vec::new(),
                 exploration: Vec::new(),
+                decisions: None,
             },
         );
     }
@@ -285,7 +304,12 @@ fn generate_one(config: &GenerateConfig, index: usize) -> Result<GeneratedSample
     solutions.truncate(config.solutions_per_scramble);
 
     Ok(GeneratedSample {
-        schema: DATASET_SCHEMA.into(),
+        schema: if config.decisions || config.features != FeatureSelection::None {
+            DATASET_SCHEMA_EXTENDED
+        } else {
+            DATASET_SCHEMA
+        }
+        .into(),
         state_format: STATE_FORMAT.into(),
         index,
         item_seed: format!("{item_seed:016x}"),
@@ -293,6 +317,7 @@ fn generate_one(config: &GenerateConfig, index: usize) -> Result<GeneratedSample
         scramble_move_count: scramble.len(),
         scramble,
         state: cube.facelets(),
+        features: cube.features(config.features),
         solutions,
     })
 }
@@ -354,6 +379,7 @@ fn add_verified_identity_variants(
                 stages: Vec::new(),
                 trace: Vec::new(),
                 exploration: Vec::new(),
+                decisions: None,
             },
         );
     }
@@ -419,6 +445,42 @@ mod tests {
         assert!(one
             .iter()
             .all(|record| !record.solutions[0].trace.is_empty()));
+    }
+
+    #[test]
+    fn enriched_generation_is_deterministic_and_uses_v4_only_when_requested() {
+        let plain = generate_dataset(&GenerateConfig {
+            count: 1,
+            difficulty: Difficulty::Easy,
+            ..GenerateConfig::default()
+        })
+        .unwrap();
+        assert_eq!(plain[0].schema, DATASET_SCHEMA);
+        assert!(plain[0].features.is_none());
+        assert!(plain[0].solutions[0].decisions.is_none());
+
+        let base = GenerateConfig {
+            count: 4,
+            seed: 20260716,
+            difficulty: Difficulty::Easy,
+            method: SolveMethod::Cfop,
+            decisions: true,
+            max_decision_records: 64,
+            features: FeatureSelection::Both,
+            threads: 1,
+            ..GenerateConfig::default()
+        };
+        let one = generate_dataset(&base).unwrap();
+        let many = generate_dataset(&GenerateConfig { threads: 2, ..base }).unwrap();
+        assert_eq!(
+            serde_json::to_string(&one).unwrap(),
+            serde_json::to_string(&many).unwrap()
+        );
+        assert!(one.iter().all(|record| {
+            record.schema == DATASET_SCHEMA_EXTENDED
+                && record.features.is_some()
+                && record.solutions[0].decisions.is_some()
+        }));
     }
 
     #[test]

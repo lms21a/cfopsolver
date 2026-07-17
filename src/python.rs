@@ -3,12 +3,14 @@ use std::path::PathBuf;
 use pyo3::{
     exceptions::{PyRuntimeError, PyValueError},
     prelude::*,
-    types::PyModule,
+    types::{PyAny, PyModule},
 };
+use serde::de::DeserializeOwned;
 
 use crate::{
     generate_dataset, generate_to_jsonl, CrossMode, Cube, Difficulty, Efficiency, Error,
-    F2lStrategy, GenerateConfig, SolveConfig, SolveMethod, Solver,
+    F2lStrategy, FeatureSelection, GenerateConfig, SolveConfig, SolveMethod, Solver,
+    TrainingVerifier, VerificationConfig,
 };
 
 fn python_error(error: Error) -> PyErr {
@@ -20,12 +22,27 @@ fn python_error(error: Error) -> PyErr {
     }
 }
 
+fn feature_selection(value: &str) -> PyResult<FeatureSelection> {
+    value
+        .parse()
+        .map_err(|error: Error| PyValueError::new_err(error.to_string()))
+}
+
 fn json_object(py: Python<'_>, value: &impl serde::Serialize) -> PyResult<PyObject> {
     let encoded =
         serde_json::to_string(value).map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
     Ok(PyModule::import(py, "json")?
         .call_method1("loads", (encoded,))?
         .into())
+}
+
+fn python_value<T: DeserializeOwned>(value: &PyAny) -> PyResult<T> {
+    let py = value.py();
+    let encoded: String = PyModule::import(py, "json")?
+        .call_method1("dumps", (value,))?
+        .extract()?;
+    serde_json::from_str(&encoded)
+        .map_err(|error| PyValueError::new_err(format!("invalid verifier input: {error}")))
 }
 
 #[pyclass(name = "Cube")]
@@ -89,6 +106,25 @@ impl PyCube {
         self.inner.facelets()
     }
 
+    #[pyo3(signature = (selection="both"))]
+    fn features(&self, py: Python<'_>, selection: &str) -> PyResult<PyObject> {
+        let selection = feature_selection(selection)?;
+        json_object(py, &self.inner.features(selection))
+    }
+
+    #[pyo3(signature = (encoding="cubie_ids"))]
+    fn feature_vector(&self, encoding: &str) -> PyResult<Vec<u8>> {
+        match encoding.to_ascii_lowercase().replace('-', "_").as_str() {
+            "cubie" | "cubie_ids" => Ok(self.inner.cubie_feature_ids().to_vec()),
+            "cubie_one_hot" => Ok(self.inner.cubie_one_hot().to_vec()),
+            "facelet" | "facelet_ids" => Ok(self.inner.facelet_ids().to_vec()),
+            "facelet_one_hot" => Ok(self.inner.facelet_one_hot().to_vec()),
+            _ => Err(PyValueError::new_err(
+                "encoding must be cubie_ids, cubie_one_hot, facelet_ids, or facelet_one_hot",
+            )),
+        }
+    }
+
     fn __str__(&self) -> String {
         self.inner.facelets()
     }
@@ -103,10 +139,40 @@ struct PySolver {
     inner: Solver,
 }
 
+#[pyclass(name = "TrainingVerifier")]
+struct PyTrainingVerifier {
+    inner: TrainingVerifier,
+}
+
+#[pymethods]
+impl PyTrainingVerifier {
+    #[new]
+    #[pyo3(signature = (threads=0, features="none"))]
+    fn new(threads: usize, features: &str) -> PyResult<Self> {
+        let features = feature_selection(features)?;
+        Ok(Self {
+            inner: TrainingVerifier::new(VerificationConfig { threads, features })
+                .map_err(python_error)?,
+        })
+    }
+
+    fn verify(&self, py: Python<'_>, item: &PyAny) -> PyResult<PyObject> {
+        let input: serde_json::Value = python_value(item)?;
+        let result = py.allow_threads(|| self.inner.verify_json(&input));
+        json_object(py, &result)
+    }
+
+    fn verify_batch(&self, py: Python<'_>, items: &PyAny) -> PyResult<PyObject> {
+        let inputs: Vec<serde_json::Value> = python_value(items)?;
+        let result = py.allow_threads(|| self.inner.verify_json_batch(&inputs));
+        json_object(py, &result)
+    }
+}
+
 #[pymethods]
 impl PySolver {
     #[new]
-    #[pyo3(signature = (method="cfop", trace=false, exploration=false, max_exploration_states=72, alternatives=0, max_depth=30, probe_limit=1_000_000, cross="cross", f2l="lookahead", efficiency="balanced"))]
+    #[pyo3(signature = (method="cfop", trace=false, exploration=false, max_exploration_states=72, alternatives=0, max_depth=30, probe_limit=1_000_000, cross="cross", f2l="lookahead", efficiency="balanced", decisions=false, max_decision_records=512))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         method: &str,
@@ -119,6 +185,8 @@ impl PySolver {
         cross: &str,
         f2l: &str,
         efficiency: &str,
+        decisions: bool,
+        max_decision_records: usize,
     ) -> PyResult<Self> {
         let method = method.parse().map_err(python_error)?;
         let cross_mode: CrossMode = cross.parse().map_err(python_error)?;
@@ -133,6 +201,8 @@ impl PySolver {
                 trace,
                 exploration,
                 max_exploration_states,
+                decisions,
+                max_decision_records,
                 alternatives,
                 max_depth,
                 probe_limit,
@@ -179,8 +249,34 @@ fn verify_solution(state: &str, solution: &str) -> PyResult<bool> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (state, selection="both"))]
+fn cube_features(py: Python<'_>, state: &str, selection: &str) -> PyResult<PyObject> {
+    let cube = Cube::from_facelets(state).map_err(python_error)?;
+    let selection = feature_selection(selection)?;
+    json_object(py, &cube.features(selection))
+}
+
+/// Verify a whole rollout batch in one Python-to-Rust call. Invalid cube or
+/// move strings remain ordinary per-item results.
+#[pyfunction]
+#[pyo3(signature = (items, threads=0, features="none"))]
+fn verify_batch(
+    py: Python<'_>,
+    items: &PyAny,
+    threads: usize,
+    features: &str,
+) -> PyResult<PyObject> {
+    let inputs: Vec<serde_json::Value> = python_value(items)?;
+    let features = feature_selection(features)?;
+    let verifier =
+        TrainingVerifier::new(VerificationConfig { threads, features }).map_err(python_error)?;
+    let result = py.allow_threads(|| verifier.verify_json_batch(&inputs));
+    json_object(py, &result)
+}
+
+#[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (count, seed=0, difficulty="hard", scramble_length=0, solutions_per_scramble=1, method="fast", threads=0, trace=false, exploration=false, cross="cross", f2l="lookahead", efficiency="balanced", max_depth=30, probe_limit=1_000_000))]
+#[pyo3(signature = (count, seed=0, difficulty="hard", scramble_length=0, solutions_per_scramble=1, method="fast", threads=0, trace=false, exploration=false, cross="cross", f2l="lookahead", efficiency="balanced", max_depth=30, probe_limit=1_000_000, decisions=false, max_decision_records=512, features="none"))]
 fn generate(
     py: Python<'_>,
     count: usize,
@@ -197,6 +293,9 @@ fn generate(
     efficiency: &str,
     max_depth: usize,
     probe_limit: u64,
+    decisions: bool,
+    max_decision_records: usize,
+    features: &str,
 ) -> PyResult<PyObject> {
     let config = py_generate_config(
         count,
@@ -213,6 +312,9 @@ fn generate(
         efficiency,
         max_depth,
         probe_limit,
+        decisions,
+        max_decision_records,
+        features,
     )?;
     let records = py
         .allow_threads(|| generate_dataset(&config))
@@ -222,7 +324,7 @@ fn generate(
 
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (path, count, seed=0, difficulty="hard", scramble_length=0, solutions_per_scramble=1, method="fast", threads=0, batch_size=1024, trace=false, exploration=false, cross="cross", f2l="lookahead", efficiency="balanced", max_depth=30, probe_limit=1_000_000))]
+#[pyo3(signature = (path, count, seed=0, difficulty="hard", scramble_length=0, solutions_per_scramble=1, method="fast", threads=0, batch_size=1024, trace=false, exploration=false, cross="cross", f2l="lookahead", efficiency="balanced", max_depth=30, probe_limit=1_000_000, decisions=false, max_decision_records=512, features="none"))]
 fn generate_jsonl(
     py: Python<'_>,
     path: PathBuf,
@@ -241,6 +343,9 @@ fn generate_jsonl(
     efficiency: &str,
     max_depth: usize,
     probe_limit: u64,
+    decisions: bool,
+    max_decision_records: usize,
+    features: &str,
 ) -> PyResult<()> {
     let config = py_generate_config(
         count,
@@ -257,6 +362,9 @@ fn generate_jsonl(
         efficiency,
         max_depth,
         probe_limit,
+        decisions,
+        max_decision_records,
+        features,
     )?;
     py.allow_threads(|| generate_to_jsonl(&config, path, batch_size))
         .map_err(python_error)
@@ -278,6 +386,9 @@ fn py_generate_config(
     efficiency: &str,
     max_depth: usize,
     probe_limit: u64,
+    decisions: bool,
+    max_decision_records: usize,
+    features: &str,
 ) -> PyResult<GenerateConfig> {
     let difficulty = match difficulty.to_ascii_lowercase().as_str() {
         "easy" => Difficulty::Easy,
@@ -293,6 +404,7 @@ fn py_generate_config(
     let cross_mode: CrossMode = cross.parse().map_err(python_error)?;
     let f2l_strategy: F2lStrategy = f2l.parse().map_err(python_error)?;
     let efficiency: Efficiency = efficiency.parse().map_err(python_error)?;
+    let features = feature_selection(features)?;
     Ok(GenerateConfig {
         count,
         seed,
@@ -308,6 +420,9 @@ fn py_generate_config(
         trace,
         exploration,
         max_exploration_states: 72,
+        decisions,
+        max_decision_records,
+        features,
         threads,
     })
 }
@@ -316,12 +431,28 @@ fn py_generate_config(
 fn cfop_solver(_py: Python<'_>, module: &PyModule) -> PyResult<()> {
     module.add_class::<PyCube>()?;
     module.add_class::<PySolver>()?;
+    module.add_class::<PyTrainingVerifier>()?;
     module.add_function(wrap_pyfunction!(apply_moves, module)?)?;
     module.add_function(wrap_pyfunction!(verify_solution, module)?)?;
+    module.add_function(wrap_pyfunction!(cube_features, module)?)?;
+    module.add_function(wrap_pyfunction!(verify_batch, module)?)?;
     module.add_function(wrap_pyfunction!(generate, module)?)?;
     module.add_function(wrap_pyfunction!(generate_jsonl, module)?)?;
     module.add("SOLVED_STATE", crate::SOLVED_FACELETS)?;
     module.add("STATE_FORMAT", crate::generator::STATE_FORMAT)?;
+    module.add("DECISION_TRACE_SCHEMA", crate::DECISION_TRACE_SCHEMA)?;
+    module.add("CUBE_FEATURE_SCHEMA", crate::CUBE_FEATURE_SCHEMA)?;
+    module.add("CUBIE_FEATURE_FORMAT", crate::CUBIE_FEATURE_FORMAT)?;
+    module.add("FACELET_ID_FORMAT", crate::FACELET_ID_FORMAT)?;
+    module.add("CUBIE_FEATURE_WIDTH", crate::CUBIE_FEATURE_WIDTH)?;
+    module.add("CUBIE_ONE_HOT_WIDTH", crate::CUBIE_ONE_HOT_WIDTH)?;
+    module.add("FACELET_ID_WIDTH", crate::FACELET_ID_WIDTH)?;
+    module.add("FACELET_ONE_HOT_WIDTH", crate::FACELET_ONE_HOT_WIDTH)?;
+    module.add(
+        "CUBIE_FEATURE_CARDINALITIES",
+        crate::CUBIE_FEATURE_CARDINALITIES.to_vec(),
+    )?;
+    module.add("VERIFICATION_SCHEMA", crate::VERIFICATION_SCHEMA)?;
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

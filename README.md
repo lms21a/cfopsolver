@@ -1,8 +1,9 @@
 # CFOP Solver
 
 A Rust-first Rubik's Cube toolkit with Python bindings, a staged CFOP solver,
-a faster two-phase solver, bounded decision/exploration traces, exact state
-validation, solution verification, and deterministic parallel JSONL generation.
+a faster two-phase solver, real bounded search decisions, optional numeric cube
+features, batch training verification, exact state validation, and deterministic
+parallel JSONL generation.
 
 ## What is included
 
@@ -16,7 +17,9 @@ validation, solution verification, and deterministic parallel JSONL generation.
 - Standard and dynamic-lookahead F2L strategies with independently replayed and
   checked phase invariants.
 - A fast two-phase solver for high-throughput use.
-- Toggleable structured decision traces and separately bounded exploratory states.
+- Toggleable real search-decision records and separately bounded counterfactual states.
+- Optional exact-frame cubie/facelet feature tensors with stable categorical IDs.
+- A reusable ordered batch verifier for RL rewards and verifier-model training.
 - Distinct alternative solutions and deterministic easy/medium/hard scramble generation.
 - Parallel in-Rust generation and bounded-memory JSONL streaming.
 - A CLI and a PyO3/maturin extension.
@@ -58,6 +61,8 @@ let result = Solver::new(SolveConfig {
     efficiency: Efficiency::Thorough,
     trace: true,
     exploration: true,
+    decisions: true,
+    max_decision_records: 512,
     alternatives: 2,
     ..SolveConfig::default()
 }).solve(&cube)?;
@@ -133,6 +138,8 @@ solver = cfop.Solver(
     trace=True,
     exploration=True,
     max_exploration_states=64,
+    decisions=True,
+    max_decision_records=512,
     alternatives=2,
 )
 result = solver.solve(cube)
@@ -146,7 +153,7 @@ next_state = cfop.apply_moves(cube.state, "R U")
 Long solve and generation operations release the Python GIL. Results are plain
 dict/list/string values and are immediately JSON-serializable.
 
-## Decision and exploration output
+## Trace, real decisions, and exploration output
 
 Tracing is off by default. `trace=True` emits phase starts, the selected moves,
 the reason for the decision, phase completion, timings, and optional canonical states.
@@ -154,25 +161,109 @@ F2L emits a separate `f2l_pair` phase for every remaining pair; each event ident
 the exact `f2l_pairs` involved. Pairs already completed by an advanced cross are listed
 on that opening phase.
 
-Exploration is a separate option because it can be much larger. When enabled, the
-solver records bounded one-ply alternatives for the stage, their move, resulting state,
-progress score, and whether the branch was selected or backtracked. Set
-`max_exploration_states` to enforce the desired cap. No exploratory state strings are
-created on the disabled path.
+`decisions=True` adds the actual choices made inside solver search as
+`cfop-decisions/v1`. Records cover F2L variants and beam candidates, accepted/rejected
+AUF routes, duplicate and beam pruning, terminal last-layer scoring, losing-branch
+backtracking, exact-target attempts, committed phases, and fast two-phase selection.
+Every record has deterministic IDs and provenance parents, typed
+domain/kind/outcome/reason fields, the relevant moves/state, and structured scores.
+`parent_id` explains which prior decision produced the branch; it is not necessarily a
+state-transition edge. Records with moves carry an exact `start_state`, and replaying
+those moves from it produces the recorded `state`. `max_decision_records` bounds only
+the observation: search continues normally, while `truncated` and `dropped_records`
+report anything omitted. Small caps reserve room for final selections and phase
+commits. No wall-clock values enter this stream, so seeded datasets remain deterministic.
+Record IDs may contain gaps when a capped stream evicts earlier low-priority records.
+
+`exploration=True` retains the older bounded one-ply counterfactual snapshot for each
+stage. It is useful for local what-if states, but it is not a claim that search actually
+visited every listed branch; use `decisions` when real search provenance matters. Set
+`max_exploration_states` to cap it. Neither path builds state strings while disabled.
 
 Each phase has `start_state`, `end_state`, `moves`, `move_count`, timing,
 `f2l_pairs`, `optimized`, and a `repaired` marker. Trace decisions and completions use
 the same `moves` key, so phase actions do not need to be recovered from prose. The
 `repaired` marker is set only if a mutable upstream stage diverges from its returned
 move list; `optimized` means exact-target search found a shorter route to the same
-verified endpoint. Dataset records using this expanded structure declare
-`schema: "cfop-dataset/v3"`.
+verified endpoint. Default and phase-traced dataset records remain
+`schema: "cfop-dataset/v3"`; decision- or feature-enriched records declare v4.
 
 Solve results expose `stats.f2l_candidates_evaluated`,
 `stats.exact_target_searches`, and `stats.last_layer_evaluations`, making the cost of
 an efficiency profile visible instead of encoding it only in elapsed time. These are
 unique physical evaluations after per-solve cache hits. Generated primary solutions
 retain the counters with wall-clock timing zeroed for deterministic output.
+
+## Structured cube features
+
+The 54-character `facelets-urfdlb-v1` string remains the only authoritative serialized
+state. Numeric features are derived, versioned, and opt-in:
+
+| Encoding | Shape | Meaning |
+|---|---:|---|
+| `cubie_ids` | 46 | centers, corner permutation/orientation, edge permutation/orientation |
+| `cubie_one_hot` | 292 | factorized one-hot form of those 46 categorical values |
+| `facelet_ids` | 54 | `U R F D L B` mapped to `0..5` in facelet order |
+| `facelet_one_hot` | 324 | six-way one-hot facelets |
+
+`cubie-factorized-urfdlb-v1` fixes the flat offsets at centers `0..6`, corner
+permutation `6..14`, corner orientation `14..22`, edge permutation `22..34`, and
+edge orientation `34..46`. Center/color IDs are `U R F D L B = 0..5`; corner
+positions and IDs are `URF UFL ULB UBR DFR DLF DBL DRB = 0..7`; edge positions and
+IDs are `UR UF UL UB DR DF DL DB FR FL BL BR = 0..11`. Orientations use `0..2` for
+corners and `0..1` for edges. Feature payloads include their format identifiers, and
+the same widths/cardinalities are exported as Python module constants.
+
+All encodings preserve the exact spatial frame, including `x`, slice, and wide moves;
+they never silently rotate the state. The accompanying `cfop_progress` reports
+`canonical_orientation`, cross edges, solved F2L pair identities, last-layer oriented
+and permuted cubie counts, and the highest sequential milestone.
+
+```python
+cube = cfop.Cube.from_scramble("x R U F")
+features = cube.features("both")             # cube-features/v1
+cubie_ids = cube.feature_vector("cubie_ids") # 46 integers
+facelet_ids = cfop.cube_features(cube.state, "facelet_ids")
+```
+
+Generation accepts `features="cubie"`, `"facelet_ids"`, or `"both"`. Disabled output
+remains byte-compatible `cfop-dataset/v3`; feature- or decision-enabled records use
+`cfop-dataset/v4` and attach features once at the sample level.
+
+## Training verifier
+
+`TrainingVerifier` owns and reuses one Rayon pool. A whole Python list crosses the FFI
+boundary once, is evaluated in parallel in Rust, and returns in input order. Bad states,
+move strings, field types, phase names, missing fields, and unknown/typoed fields become
+per-item parse diagnostics instead of aborting neighboring samples.
+
+```python
+verifier = cfop.TrainingVerifier(threads=8, features="cubie")
+batch = verifier.verify_batch([
+    {
+        "id": "rollout-0",
+        "state": state,
+        "moves": candidate,
+        "known_solutions": [known_solution],
+        "phase_boundaries": [
+            {"stage": "cross", "after_move": 7},
+            {"stage": "f2l_pair", "after_move": 15, "f2l_pairs": ["fr"]},
+        ],
+    },
+    {"id": "malformed", "state": state, "moves": "not-a-move"},
+])
+```
+
+Each result includes parse validity, exact final state, physical solved status, literal
+move count, Cross/F2L/OLL/PLL progress, preserved/broken/gained F2L pairs, the first
+phase-invariant violation, and signed move excess versus the shortest parsed and
+verified known solution. Negative excess means the candidate found a shorter solution;
+unsolved candidates report `null` rather than receiving a misleading favorable score.
+When boundaries are supplied, phase invariants are checked at each declaration and once
+at the end, not after every atomic move, because valid algorithms may temporarily
+disturb a pair inside a phase. Without boundaries the invariant status is
+`not_provided`. The convenience `cfop.verify_batch(...)` builds a pool for one call;
+reuse the class for repeated training batches.
 
 ## Bulk generation
 
@@ -200,6 +291,9 @@ records = cfop.generate(
     f2l="lookahead",
     efficiency="thorough",
     trace=True,
+    decisions=True,
+    max_decision_records=512,
+    features="cubie",
     threads=8,
 )
 ```
@@ -239,8 +333,10 @@ cfop solve --scramble "R U F" --method cfop \
   --cross xxcross --f2l lookahead --efficiency thorough --trace --explore --json
 cfop apply --state "$STATE" --moves "R U R' U'"
 cfop verify --scramble "R U F" --solution "F' U' R'"
+cfop features --scramble "x R U F" --encoding both
 cfop generate --count 1000 --output data.jsonl --method cfop \
-  --efficiency thorough --probe-limit 500000 --solutions 2 --threads 4
+  --efficiency thorough --decisions --features cubie \
+  --probe-limit 500000 --solutions 2 --threads 4
 ```
 
 ## Performance snapshot
@@ -266,6 +362,14 @@ byte-for-byte. Three default-feature release runs measured median times of 0.72 
 1.86 s, 2.25 s, and 2.54 s respectively, keeping throughput within normal local
 variance while removing the patched path dependency. A separate 1,000-record direct
 two-phase corpus and a repeated-alternative corpus also matched v0.3.1 byte-for-byte.
+
+The default-disabled v0.4.0 instrumentation was checked against those saved v0.3.2
+artifacts: all four 1,000-record profile JSONL files remained byte-identical, and a
+warmed fast-profile run took 0.69 s. For the new verifier, three end-to-end Python runs
+over repeated three-move candidates (eight verifier threads, including Python JSON
+conversion) measured median throughput of about 128,000 samples/s without features
+and 81,100 samples/s with cubie features. These simple-candidate figures are a local
+throughput sanity check, not a proxy for every rollout distribution.
 
 ## Development
 
