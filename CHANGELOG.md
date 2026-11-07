@@ -14,8 +14,8 @@ Public-release preparation after the private 0.4.0 milestone.
   `static_init` with standard-library `LazyLock`, removing its unmaintained dependency.
 - Raise the minimum Rust version from 1.70 to 1.85 and the minimum Python version
   from 3.8 to 3.9. Use the CPython 3.9 stable ABI for wheels.
-- Add CI for Rust, Python, installed wheels, source distributions, and dependency
-  audits, plus contribution, security, packaging, and release documentation.
+- Add local checks for installed wheels, source distributions, and dependency
+  notices, plus contribution, security, packaging, and release documentation.
 - Include the full retained engine provenance and upstream MIT notices in
   distributed artifacts.
 

@@ -429,8 +429,8 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 `uv.lock` controls Python build and development dependencies; `Cargo.lock` controls
 Rust dependencies. The checkout targets Rust 1.85, builds CPython abi3 wheels for
 Python 3.9+, and uses Python 3.12 for local development via `.python-version`.
-The CI matrix includes CPython 3.9, 3.12, and 3.15 on Linux, and 3.12 on macOS and
-Windows; it also installs built wheels and rebuilds from source distributions.
+Release validation covered CPython 3.9, 3.12, and 3.15 on Linux, and 3.12 on macOS
+and Windows, including installed wheels and source-distribution rebuilds.
 The private cube engine retains the required MIT-licensed portions of `rcuber` 0.7.20
 inside `src/engine/`, including the pair-boundary performance extension. Unused solver
 families and packaging code are excluded; see `THIRD_PARTY_NOTICES.md` for attribution.

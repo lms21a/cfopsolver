@@ -10,8 +10,8 @@ publishing packages, and creating a release are separate maintainer actions.
 2. Read [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), preserve its notices, and run
    a full-history secret scan before first making the repository public. The
    preparation scan used Gitleaks 8.30.1 with no findings; rerun it after later changes.
-3. Require a green `CI` workflow on the exact commit. It checks the Rust minimum and
-   current toolchains, Python versions, Linux/macOS/Windows, dependency advisories,
+3. Test the exact release commit with the minimum and current Rust toolchains and
+   supported Python versions on Linux/macOS/Windows. Check dependency advisories,
    wheel contents, installed wheels, and a source-distribution rebuild. Review any
    platform failures before claiming that platform is supported.
 4. Run the local checks in [CONTRIBUTING.md](CONTRIBUTING.md), then build into a clean
@@ -32,13 +32,10 @@ publishing packages, and creating a release are separate maintainer actions.
    builder for Linux wheels. Local `linux_x86_64` wheels are local test artifacts and
    are not portable PyPI Linux wheels.
 6. Enable GitHub private vulnerability reporting and repository security features
-   where available. Configure required CI checks and review protections for `main`.
+   where available. Configure review protections for `main`.
 7. When authorized, change repository visibility and publish the reviewed version.
    Use PyPI trusted publishing or an appropriately scoped token, and `cargo publish
    --locked`. Publish wheels for the platforms being advertised, together with the
-   sdist. Never put credentials in the repository or workflow files.
+   sdist. Never put credentials in the repository or build configuration.
 8. Tag the exact reviewed commit as `v<version>`, create release notes from the
    changelog, and verify a fresh install from each public registry after publishing.
-
-The CI workflow only builds, tests, audits, and uploads workflow artifacts.
-It does not publish to PyPI/crates.io, create a GitHub release, or change visibility.
