@@ -19,18 +19,20 @@ use crate::{
     Algorithm, Cube, Error, Move, Result,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SolveMethod {
     /// Human-style Cross, F2L, OLL, PLL stages.
+    #[default]
     Cfop,
     /// High-throughput two-phase search, typically with shorter solutions.
     Fast,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CrossMode {
+    #[default]
     Cross,
     #[serde(rename = "xcross")]
     XCross,
@@ -57,12 +59,6 @@ impl CrossMode {
             Self::XXCross => Stage::XXCross,
             Self::XXXCross => Stage::XXXCross,
         }
-    }
-}
-
-impl Default for CrossMode {
-    fn default() -> Self {
-        Self::Cross
     }
 }
 
@@ -93,17 +89,12 @@ impl FromStr for CrossMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum F2lStrategy {
     Standard,
+    #[default]
     Lookahead,
-}
-
-impl Default for F2lStrategy {
-    fn default() -> Self {
-        Self::Lookahead
-    }
 }
 
 impl fmt::Display for F2lStrategy {
@@ -129,10 +120,11 @@ impl FromStr for F2lStrategy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Efficiency {
     Fast,
+    #[default]
     Balanced,
     Thorough,
     Max,
@@ -154,12 +146,6 @@ impl Efficiency {
             }
         }
         budgets
-    }
-}
-
-impl Default for Efficiency {
-    fn default() -> Self {
-        Self::Balanced
     }
 }
 
@@ -207,12 +193,6 @@ impl fmt::Display for F2lPair {
             Self::Bl => "BL",
             Self::Br => "BR",
         })
-    }
-}
-
-impl Default for SolveMethod {
-    fn default() -> Self {
-        Self::Cfop
     }
 }
 
@@ -3169,8 +3149,7 @@ mod tests {
             trace
                 .records
                 .iter()
-                .filter(|record| record.domain == DecisionDomain::Phase)
-                .next_back()
+                .rfind(|record| record.domain == DecisionDomain::Phase)
                 .map(|record| record.stage),
             Some(Stage::Pll)
         );
@@ -3178,11 +3157,10 @@ mod tests {
             trace
                 .records
                 .iter()
-                .filter(|record| {
+                .rfind(|record| {
                     record.domain != DecisionDomain::Phase
                         && matches!(record.kind, DecisionKind::Select | DecisionKind::SearchEnd)
                 })
-                .next_back()
                 .map(|record| (&record.kind, record.stage)),
             Some((&DecisionKind::Select, Stage::F2l))
         );

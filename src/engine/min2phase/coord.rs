@@ -1,5 +1,5 @@
 use std::cmp::max;
-use std::{fmt, usize};
+use std::fmt;
 
 use super::arraycube::ArrayCube;
 use super::constants::*;

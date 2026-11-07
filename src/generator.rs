@@ -19,11 +19,12 @@ pub const DATASET_SCHEMA: &str = "cfop-dataset/v3";
 pub const DATASET_SCHEMA_EXTENDED: &str = "cfop-dataset/v4";
 pub const STATE_FORMAT: &str = "facelets-urfdlb-v1";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Difficulty {
     Easy,
     Medium,
+    #[default]
     Hard,
 }
 
@@ -34,12 +35,6 @@ impl Difficulty {
             Self::Medium => 12,
             Self::Hard => 20,
         }
-    }
-}
-
-impl Default for Difficulty {
-    fn default() -> Self {
-        Self::Hard
     }
 }
 

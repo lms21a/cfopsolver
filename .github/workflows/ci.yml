@@ -18,6 +18,7 @@ concurrency:
 jobs:
   rust:
     name: Rust ${{ matrix.toolchain }}
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -26,7 +27,7 @@ jobs:
     env:
       RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install Rust
         run: rustup toolchain install "${{ matrix.toolchain }}" --profile minimal --component clippy --component rustfmt
       - name: Check formatting
@@ -41,6 +42,7 @@ jobs:
 
   python:
     name: Python ${{ matrix.python }} / ${{ matrix.os }}
+    timeout-minutes: 20
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -54,7 +56,7 @@ jobs:
     env:
       RUSTUP_TOOLCHAIN: stable
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
         with:
           version: "0.13.7"
@@ -69,18 +71,19 @@ jobs:
       - run: uv build --wheel --sdist --out-dir dist/ci
       - run: uv run --locked python scripts/check_distributions.py dist/ci
       - run: uv run --locked python scripts/test_wheel.py dist/ci
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: packages-${{ matrix.os }}-py${{ matrix.python }}
           path: dist/ci/*
 
   source:
     name: Clean source builds
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     env:
       RUSTUP_TOOLCHAIN: stable
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
         with:
           version: "0.13.7"
@@ -98,11 +101,12 @@ jobs:
 
   security:
     name: Dependency and history audits
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     env:
       RUSTUP_TOOLCHAIN: stable
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
       - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
