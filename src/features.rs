@@ -80,7 +80,7 @@ impl FromStr for FeatureSelection {
             "cubie" | "cubies" => Ok(Self::Cubie),
             "facelet" | "facelets" | "facelet_id" | "facelet_ids" => Ok(Self::FaceletIds),
             "both" | "all" => Ok(Self::Both),
-            _ => Err(Error::Solver(format!(
+            _ => Err(Error::InvalidConfig(format!(
                 "unknown feature selection {value:?}"
             ))),
         }

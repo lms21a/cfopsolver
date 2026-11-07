@@ -8,6 +8,8 @@ pub enum Error {
     InvalidState(String),
     #[error("invalid move or algorithm: {0}")]
     InvalidAlgorithm(String),
+    #[error("invalid configuration: {0}")]
+    InvalidConfig(String),
     #[error("solver failed: {0}")]
     Solver(String),
     #[error("I/O error: {0}")]

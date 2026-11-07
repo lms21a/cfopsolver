@@ -1,7 +1,7 @@
 use rand::random;
-use static_init::dynamic;
 use std::fmt;
 use std::ops::Mul;
+use std::sync::LazyLock;
 
 use self::{Corner::*, Edge::*, Move::*};
 use crate::engine::constants::*;
@@ -731,8 +731,7 @@ impl AllMoveCubeTables {
 
 /// All move cube tables.
 /// [U, U2, U3, R, R2, R3, F, F2, F3, D, D2, D3, L, L2, L3, B, B2, B3, M, M2, M3, E, E2, E3, S, S2, S3, Uw, Uw2, Uw3, Rw, Rw2, Rw3, Fw, Fw2, Fw3, Dw, Dw2, Dw3, Lw, Lw2, Lw3, Bw, Bw2, Bw3, x, x2, x3, y, y2, y3, z, z2, z3, N]
-#[dynamic]
-static AMCT: AllMoveCubeTables = AllMoveCubeTables::new();
+static AMCT: LazyLock<AllMoveCubeTables> = LazyLock::new(AllMoveCubeTables::new);
 
 /// Rotate array arr right between left and right. right is included.
 pub fn rotate_right<T: Copy>(arr: &mut [T], left: usize, right: usize) {

@@ -240,7 +240,9 @@ fn cubies_from_facelets(face: &FaceCube) -> Result<CubieCube> {
         let color2 = face.f[corner_facelets[(orientation + 2) % 3] as usize];
         let piece = (0..8)
             .find(|&candidate| {
-                CORNER_COLOR[candidate][1] == color1 && CORNER_COLOR[candidate][2] == color2
+                CORNER_COLOR[candidate][0] == face.f[corner_facelets[orientation] as usize]
+                    && CORNER_COLOR[candidate][1] == color1
+                    && CORNER_COLOR[candidate][2] == color2
             })
             .ok_or_else(|| Error::InvalidState(format!("invalid colors on corner {position}")))?;
         if seen_corners[piece] {
@@ -383,6 +385,16 @@ mod tests {
         impossible.swap(0, 9);
         let impossible = String::from_utf8(impossible).unwrap();
         assert!(Cube::from_facelets(&impossible).is_err());
+    }
+
+    #[test]
+    fn rejects_opposite_corner_stickers_with_valid_counts() {
+        // Counts, twist sums, and inferred side colors alone cannot distinguish
+        // this invalid cube from solved. All three corner stickers must match.
+        let mut invalid = SOLVED_FACELETS.as_bytes().to_vec();
+        invalid.swap(8, 29);
+        let invalid = String::from_utf8(invalid).unwrap();
+        assert!(Cube::from_facelets(&invalid).is_err());
     }
 
     #[test]

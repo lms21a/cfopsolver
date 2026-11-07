@@ -5,6 +5,9 @@ a faster two-phase solver, real bounded search decisions, optional numeric cube
 features, batch training verification, exact state validation, and deterministic
 parallel JSONL generation.
 
+Requires Rust 1.85+ to build and CPython 3.9+ for the Python API. This is a
+3x3 solver; search budgets do not guarantee an optimal solution.
+
 ## What is included
 
 - `Cube`: compact cubie state with exact center-frame tracking.
@@ -40,6 +43,18 @@ length, alphabet, counts, unique cubies, corner twist, edge flip, the 24 legal c
 frames, and combined corner/edge/center parity.
 
 ## Rust
+
+Build and install the CLI from a checkout:
+
+```bash
+git clone https://github.com/lms21a/cfopsolver.git
+cd cfopsolver
+cargo install --path . --locked
+cfop --version
+```
+
+Rustup reads `rust-toolchain.toml` for the development toolchain. The library crate
+is named `cfop_solver`; the binary is `cfop`.
 
 ```rust
 use cfop_solver::{CrossMode, Cube, Efficiency, F2lStrategy, SolveConfig, Solver};
@@ -113,15 +128,21 @@ The Python project and its development tools are managed by
 installs the extension in editable mode, and syncs the versions in `uv.lock`:
 
 ```bash
-uv sync
+uv sync --locked
 uv run python examples/python_api.py
 ```
 
-The environment remains an ordinary virtual environment, so direct execution works too:
+Building from source requires a Rust toolchain and a platform C linker. The uv
+environment remains an ordinary virtual environment, so direct execution works too:
 
 ```bash
 .venv/bin/python examples/python_api.py
 ```
+
+On Windows use `.venv\Scripts\python.exe`. To consume a locally built wheel without
+the development tools, use `uv pip install path/to/cfop_solver-<version>-<platform>.whl`.
+After changing Rust sources, rebuild the editable extension with
+`uv sync --reinstall-package cfop-solver`.
 
 ```python
 import cfop_solver as cfop
@@ -237,6 +258,10 @@ boundary once, is evaluated in parallel in Rust, and returns in input order. Bad
 move strings, field types, phase names, missing fields, and unknown/typoed fields become
 per-item parse diagnostics instead of aborting neighboring samples.
 
+Gate rewards on `parse.valid` as well as the desired success criteria. An item with
+malformed annotations can still have `solved=True` and a computed final state while
+its `parse.input_valid` is false and its phase check is `invalid`.
+
 ```python
 verifier = cfop.TrainingVerifier(threads=8, features="cubie")
 batch = verifier.verify_batch([
@@ -264,6 +289,16 @@ at the end, not after every atomic move, because valid algorithms may temporaril
 disturb a pair inside a phase. Without boundaries the invariant status is
 `not_provided`. The convenience `cfop.verify_batch(...)` builds a pool for one call;
 reuse the class for repeated training batches.
+
+`move_count` counts executed notation tokens: a double turn, rotation, slice, or wide
+move each counts as one. It does not infer the shortest equivalent sequence. CFOP
+progress is measured in the exact input frame; `solved` accepts a rotated solved
+cube. Pair preservation compares normalized copies, so a whole-cube rotation alone
+does not break pairs. Phase boundaries refer to cumulative token offsets in the
+submitted candidate. When using solver stages as annotations, concatenate their
+`moves` and count offsets from that concatenation; the globally simplified
+`solution` can have different offsets across phase joins. See the runnable Python
+example for this construction.
 
 ## Bulk generation
 
@@ -326,6 +361,11 @@ the fast solver result plus the independently verified inverse of the known scra
 requests beyond two additionally use continued solution search, with verified identity
 variants only as an explicitly labeled final fallback.
 
+Difficulty names choose random move-sequence lengths (5, 12, or 20 by default),
+not a certified distance from solved. These are reproducible random-turn scrambles,
+not uniformly sampled cube states or official competition scrambles. Filter by
+`source` when training on alternatives if identity variants are unsuitable.
+
 ## CLI
 
 ```bash
@@ -374,7 +414,7 @@ throughput sanity check, not a proxy for every rollout distribution.
 ## Development
 
 ```bash
-uv sync
+uv sync --locked
 uv lock --check
 uv run pytest
 uv run ruff check .
@@ -382,13 +422,22 @@ uv run ruff format --check .
 uv run mypy
 uv build --wheel
 
-cargo test
-cargo check --features python
+cargo test --locked --all-targets --all-features
+cargo clippy --locked --all-targets --all-features -- -D warnings
 ```
 
 `uv.lock` controls Python build and development dependencies; `Cargo.lock` controls
-Rust dependencies. The checkout currently targets Rust 1.70, publishes an abi3 wheel
-for Python 3.8+, and uses Python 3.12 for local development via `.python-version`.
+Rust dependencies. The checkout targets Rust 1.85, builds CPython abi3 wheels for
+Python 3.9+, and uses Python 3.12 for local development via `.python-version`.
+The CI matrix includes CPython 3.9, 3.12, and 3.15 on Linux, and 3.12 on macOS and
+Windows; it also installs built wheels and rebuilds from source distributions.
 The private cube engine retains the required MIT-licensed portions of `rcuber` 0.7.20
 inside `src/engine/`, including the pair-boundary performance extension. Unused solver
 families and packaging code are excluded; see `THIRD_PARTY_NOTICES.md` for attribution.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development checks,
+[CHANGELOG.md](CHANGELOG.md) for compatibility changes,
+[SECURITY.md](SECURITY.md) for private reporting, and
+[RELEASING.md](RELEASING.md) for the publication checklist. Dependency license texts
+are bundled in `THIRD_PARTY_DEPENDENCIES.txt`; regenerate them after updating
+`Cargo.lock` with `uv run python scripts/generate_dependency_licenses.py`.

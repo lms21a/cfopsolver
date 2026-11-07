@@ -18,7 +18,21 @@ fn run() -> cfop_solver::Result<()> {
         print_usage();
         return Ok(());
     };
-    let options = parse_options(args.collect())?;
+    if matches!(command.as_str(), "--version" | "-V") {
+        println!("cfop {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    let values: Vec<_> = args.collect();
+    if matches!(command.as_str(), "help" | "--help" | "-h")
+        || values
+            .iter()
+            .any(|value| matches!(value.as_str(), "--help" | "-h"))
+    {
+        print_usage();
+        return Ok(());
+    }
+    let options = parse_options(values)?;
+    validate_options(&command, &options)?;
     match command.as_str() {
         "solve" => {
             let cube = input_cube(&options)?;
@@ -134,6 +148,11 @@ fn run() -> cfop_solver::Result<()> {
 }
 
 fn input_cube(options: &HashMap<String, Option<String>>) -> cfop_solver::Result<Cube> {
+    if options.contains_key("state") && options.contains_key("scramble") {
+        return Err(cfop_solver::Error::InvalidConfig(
+            "--state and --scramble are mutually exclusive".into(),
+        ));
+    }
     if let Some(state) = option(options, "state") {
         Cube::from_facelets(state)
     } else if let Some(scramble) = option(options, "scramble") {
@@ -160,10 +179,92 @@ fn parse_options(values: Vec<String>) -> cfop_solver::Result<HashMap<String, Opt
         } else {
             None
         };
-        result.insert(key, value);
+        if result.insert(key.clone(), value).is_some() {
+            return Err(cfop_solver::Error::InvalidConfig(format!(
+                "duplicate option --{key}"
+            )));
+        }
         index += 1;
     }
     Ok(result)
+}
+
+fn validate_options(
+    command: &str,
+    options: &HashMap<String, Option<String>>,
+) -> cfop_solver::Result<()> {
+    let (values, flags): (&[&str], &[&str]) = match command {
+        "solve" => (
+            &[
+                "state",
+                "scramble",
+                "method",
+                "cross",
+                "f2l",
+                "efficiency",
+                "max-exploration",
+                "max-decisions",
+                "alternatives",
+                "max-depth",
+                "probe-limit",
+            ],
+            &["trace", "explore", "decisions", "json"],
+        ),
+        "apply" => (&["state", "scramble", "moves"], &[]),
+        "verify" => (&["state", "scramble", "solution"], &[]),
+        "features" => (&["state", "scramble", "encoding"], &[]),
+        "generate" => (
+            &[
+                "count",
+                "seed",
+                "difficulty",
+                "length",
+                "solutions",
+                "method",
+                "cross",
+                "f2l",
+                "efficiency",
+                "max-depth",
+                "probe-limit",
+                "max-exploration",
+                "max-decisions",
+                "features",
+                "threads",
+                "output",
+                "batch-size",
+            ],
+            &["trace", "explore", "decisions"],
+        ),
+        _ => {
+            return Err(cfop_solver::Error::InvalidConfig(format!(
+                "unknown command {command:?}"
+            )))
+        }
+    };
+    // Stable ordering makes diagnostics reproducible when multiple fields are wrong.
+    let mut keys: Vec<_> = options.keys().collect();
+    keys.sort_unstable();
+    for key in keys {
+        let value = &options[key];
+        if values.contains(&key.as_str()) {
+            if value.is_none() {
+                return Err(cfop_solver::Error::InvalidConfig(format!(
+                    "--{key} requires a value"
+                )));
+            }
+        } else if flags.contains(&key.as_str()) {
+            if value.is_some() {
+                return Err(cfop_solver::Error::InvalidConfig(format!(
+                    "--{key} does not take a value"
+                )));
+            }
+        } else {
+            return Err(cfop_solver::Error::InvalidConfig(format!(
+                "unknown option --{key} for {command}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn option<'a>(options: &'a HashMap<String, Option<String>>, key: &str) -> Option<&'a str> {
@@ -201,11 +302,14 @@ where
 
 fn print_usage() {
     println!(
-        "cfop-solver\n\n\
+        "cfop-solver {version}\n\n\
          solve    [--scramble MOVES | --state FACELETS] [--method cfop|fast] [--cross cross|xcross|xxcross|xxxcross] [--f2l standard|lookahead] [--efficiency fast|balanced|thorough|max] [--trace] [--explore] [--decisions] [--max-decisions N] [--alternatives N] [--json]\n\
          apply    [--scramble MOVES | --state FACELETS] --moves MOVES\n\
          verify   [--scramble MOVES | --state FACELETS] --solution MOVES\n\
          features [--scramble MOVES | --state FACELETS] [--encoding cubie|facelet-ids|both]\n\
-         generate --count N --output FILE [--difficulty easy|medium|hard] [--cross MODE] [--f2l STRATEGY] [--efficiency PROFILE] [--decisions] [--max-decisions N] [--features none|cubie|facelet-ids|both] [--max-depth N] [--probe-limit N] [--solutions N] [--threads N]"
+         generate --count N --output FILE [--seed N] [--difficulty easy|medium|hard] [--length N] [--method cfop|fast] [--cross MODE] [--f2l STRATEGY] [--efficiency PROFILE] [--trace] [--explore] [--decisions] [--max-decisions N] [--features none|cubie|facelet-ids|both] [--max-depth N] [--probe-limit N] [--solutions N] [--threads N] [--batch-size N]\n\n\
+         Search limits: max-depth 1..30; probe-limit >= 1.\n\
+         verify exits 0 for solved, 1 for unsolved, and 2 for invalid input. Other commands exit 2 on error.",
+        version = env!("CARGO_PKG_VERSION")
     );
 }

@@ -2,7 +2,7 @@ use super::arraycube::{ArrayCube, PermOriCube};
 use super::constants::*;
 use super::coord::CoordCube;
 use super::utils::UT;
-use static_init::dynamic;
+use std::sync::LazyLock;
 
 /// Move data tables.
 #[derive(Debug)]
@@ -796,23 +796,17 @@ impl PruningTables {
     }
 }
 
-#[dynamic(lazy)]
-pub static MT: MoveTables = MoveTables::new();
+pub static MT: LazyLock<MoveTables> = LazyLock::new(MoveTables::new);
 
-#[dynamic(lazy)]
-pub static ST: SymTables = SymTables::new();
+pub static ST: LazyLock<SymTables> = LazyLock::new(SymTables::new);
 
-#[dynamic(lazy)]
-pub static S2RT: Sym2RawTables = Sym2RawTables::new();
+pub static S2RT: LazyLock<Sym2RawTables> = LazyLock::new(Sym2RawTables::new);
 
-#[dynamic(lazy)]
-pub static IT: InvTables = InvTables::new();
+pub static IT: LazyLock<InvTables> = LazyLock::new(InvTables::new);
 
-#[dynamic(lazy)]
-pub static CT: CoordTables = CoordTables::new();
+pub static CT: LazyLock<CoordTables> = LazyLock::new(CoordTables::new);
 
-#[dynamic(lazy)]
-pub static PT: PruningTables = PruningTables::new();
+pub static PT: LazyLock<PruningTables> = LazyLock::new(PruningTables::new);
 
 #[cfg(test)]
 mod tests {

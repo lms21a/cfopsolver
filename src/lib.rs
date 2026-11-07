@@ -1,4 +1,5 @@
 //! Traceable and batch-friendly Rubik's Cube solving.
+#![doc = include_str!("../README.md")]
 
 mod engine;
 

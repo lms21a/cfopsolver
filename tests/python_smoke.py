@@ -1,6 +1,7 @@
 """End-to-end smoke tests for the uv-managed Python extension."""
 
 import tempfile
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -48,9 +49,14 @@ def test_python_api() -> None:
     assert len(features["facelet_ids"]) == 54
     assert len(cube.feature_vector("cubie_ids")) == 46
     assert len(cube.feature_vector("cubie_one_hot")) == 292
+    for encoding in ["cubie_ids", "cubie_one_hot", "facelet_ids", "facelet_one_hot"]:
+        vector = cube.feature_vector(encoding)
+        assert isinstance(vector, list)
+        assert all(isinstance(value, int) for value in vector)
     assert cfop.CUBIE_FEATURE_WIDTH == 46
     assert cfop.CUBIE_ONE_HOT_WIDTH == 292
     assert len(cfop.CUBIE_FEATURE_CARDINALITIES) == 46
+    assert isinstance(cfop.CUBIE_FEATURE_CARDINALITIES, list)
     with pytest.raises(ValueError):
         cube.features("not-an-encoding")
 
@@ -128,9 +134,43 @@ def test_python_api() -> None:
     reusable = cfop.TrainingVerifier(threads=2)
     assert reusable.verify_batch(batch_items)["results"][0]["solved"]
 
-    with tempfile.NamedTemporaryFile(suffix=".jsonl") as output:
-        cfop.generate_jsonl(output.name, 12, seed=8, batch_size=5, threads=2)
-        assert sum(1 for _ in open(output.name, encoding="utf-8")) == 12
+    with tempfile.TemporaryDirectory() as directory:
+        output = Path(directory) / "samples.jsonl"
+        cfop.generate_jsonl(output, 12, seed=8, batch_size=5, threads=2)
+        with output.open(encoding="utf-8") as stream:
+            assert sum(1 for _ in stream) == 12
+
+
+def test_rejects_invalid_states_grouping_and_configuration() -> None:
+    stickers = list(cfop.SOLVED_STATE)
+    stickers[8], stickers[29] = stickers[29], stickers[8]
+    invalid_state = "".join(stickers)
+    with pytest.raises(ValueError, match="corner"):
+        cfop.Cube(invalid_state)
+    with pytest.raises(ValueError, match="parenthesis"):
+        cfop.Cube.from_scramble("(R U")
+    invalid_options: list[dict[str, Any]] = [
+        {"max_depth": 31},
+        {"max_depth": 0},
+        {"probe_limit": 0},
+        {"method": "typo"},
+    ]
+    for options in invalid_options:
+        with pytest.raises(ValueError):
+            cfop.Solver(**options)
+
+    results = cfop.verify_batch(
+        [
+            {"state": invalid_state, "moves": ""},
+            {"state": cfop.SOLVED_STATE, "moves": "(R R'"},
+            {"state": cfop.SOLVED_STATE, "moves": ""},
+        ]
+    )["results"]
+    assert not results[0]["parse"]["state_valid"]
+    assert not results[0]["solved"]
+    assert not results[1]["parse"]["moves_valid"]
+    assert not results[1]["solved"]
+    assert results[2]["parse"]["valid"] and results[2]["solved"]
 
 
 if __name__ == "__main__":

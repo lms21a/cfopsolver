@@ -206,6 +206,22 @@ impl FromStr for Algorithm {
                 "commutator/conjugate notation is not supported; expand it into moves".into(),
             ));
         }
+        let mut nesting = 0usize;
+        for character in value.chars() {
+            match character {
+                '(' => nesting += 1,
+                ')' if nesting == 0 => {
+                    return Err(Error::InvalidAlgorithm(
+                        "unmatched closing parenthesis".into(),
+                    ))
+                }
+                ')' => nesting -= 1,
+                _ => {}
+            }
+        }
+        if nesting != 0 {
+            return Err(Error::InvalidAlgorithm("unclosed parenthesis".into()));
+        }
         let cleaned = value.replace(['(', ')'], " ").replace('’', "'");
         let moves = cleaned
             .split_whitespace()
@@ -274,5 +290,17 @@ mod tests {
             "R'"
         );
         assert!("R R'".parse::<Algorithm>().unwrap().simplified().is_empty());
+    }
+
+    #[test]
+    fn rejects_malformed_grouping_without_losing_valid_group_support() {
+        for invalid in ["(R U", "R U)", ")(", "((R)"] {
+            assert!(invalid.parse::<Algorithm>().is_err(), "{invalid}");
+        }
+        assert_eq!(
+            "(R (U R'))".parse::<Algorithm>().unwrap().to_string(),
+            "R U R'"
+        );
+        assert!("(R U)2".parse::<Algorithm>().is_err());
     }
 }

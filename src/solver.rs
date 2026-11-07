@@ -86,7 +86,9 @@ impl FromStr for CrossMode {
             "x" | "xcross" | "1" => Ok(Self::XCross),
             "xx" | "xxcross" | "2" => Ok(Self::XXCross),
             "xxx" | "xxxcross" | "3" => Ok(Self::XXXCross),
-            _ => Err(Error::Solver(format!("unknown cross mode {value:?}"))),
+            _ => Err(Error::InvalidConfig(format!(
+                "unknown cross mode {value:?}"
+            ))),
         }
     }
 }
@@ -120,7 +122,9 @@ impl FromStr for F2lStrategy {
         match value.to_ascii_lowercase().as_str() {
             "standard" | "legacy" => Ok(Self::Standard),
             "lookahead" | "efficient" | "advanced" => Ok(Self::Lookahead),
-            _ => Err(Error::Solver(format!("unknown F2L strategy {value:?}"))),
+            _ => Err(Error::InvalidConfig(format!(
+                "unknown F2L strategy {value:?}"
+            ))),
         }
     }
 }
@@ -179,7 +183,7 @@ impl FromStr for Efficiency {
             "balanced" | "default" | "medium" => Ok(Self::Balanced),
             "thorough" | "high" | "quality" => Ok(Self::Thorough),
             "max" | "maximum" | "exhaustive" => Ok(Self::Max),
-            _ => Err(Error::Solver(format!(
+            _ => Err(Error::InvalidConfig(format!(
                 "unknown efficiency profile {value:?}"
             ))),
         }
@@ -228,7 +232,9 @@ impl FromStr for SolveMethod {
         match value.to_ascii_lowercase().as_str() {
             "cfop" => Ok(Self::Cfop),
             "fast" | "two_phase" | "two-phase" | "kociemba" => Ok(Self::Fast),
-            _ => Err(Error::Solver(format!("unknown solve method {value:?}"))),
+            _ => Err(Error::InvalidConfig(format!(
+                "unknown solve method {value:?}"
+            ))),
         }
     }
 }
@@ -293,6 +299,23 @@ pub struct SolveConfig {
     pub alternatives: usize,
     pub max_depth: usize,
     pub probe_limit: u64,
+}
+
+impl SolveConfig {
+    /// Validate search limits before allocating search state or producing output.
+    pub fn validate(&self) -> Result<()> {
+        if !(1..=30).contains(&self.max_depth) {
+            return Err(Error::InvalidConfig(
+                "max_depth must be between 1 and 30".into(),
+            ));
+        }
+        if self.probe_limit == 0 {
+            return Err(Error::InvalidConfig(
+                "probe_limit must be at least one".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Default for SolveConfig {
@@ -719,6 +742,7 @@ impl Solver {
     }
 
     pub fn solve(&self, cube: &Cube) -> Result<SolveResult> {
+        self.config.validate()?;
         let started = Instant::now();
         let input_state = cube.facelets();
         let mut decisions = DecisionRecorder::new(&self.config);
@@ -3173,7 +3197,6 @@ mod tests {
             .all(|pair| pair[0].index < pair[1].index));
         assert!(trace.records.iter().all(|record| record
             .parent_id
-            .map_or(true, |parent| parent < record.index
-                && retained_ids.contains(&parent))));
+            .is_none_or(|parent| parent < record.index && retained_ids.contains(&parent))));
     }
 }

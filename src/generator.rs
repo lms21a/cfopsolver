@@ -149,10 +149,12 @@ pub fn generate_to_jsonl(
 ) -> Result<()> {
     validate_config(config)?;
     if batch_size == 0 {
-        return Err(Error::Solver("batch_size must be at least one".into()));
+        return Err(Error::InvalidConfig(
+            "batch_size must be at least one".into(),
+        ));
     }
-    let mut writer = BufWriter::new(File::create(path)?);
     let pool = generation_pool(config.threads)?;
+    let mut writer = BufWriter::new(File::create(path)?);
     let mut offset = 0;
     while offset < config.count {
         let size = batch_size.min(config.count - offset);
@@ -405,11 +407,16 @@ fn generated_stats(method: SolveMethod, move_count: usize) -> SolveStats {
 
 fn validate_config(config: &GenerateConfig) -> Result<()> {
     if config.solutions_per_scramble == 0 {
-        return Err(Error::Solver(
+        return Err(Error::InvalidConfig(
             "solutions_per_scramble must be at least one".into(),
         ));
     }
-    Ok(())
+    SolveConfig {
+        max_depth: config.max_depth,
+        probe_limit: config.probe_limit,
+        ..SolveConfig::default()
+    }
+    .validate()
 }
 
 fn derive_seed(root: u64, index: u64) -> u64 {

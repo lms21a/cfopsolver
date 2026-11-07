@@ -1,23 +1,35 @@
 [build-system]
-requires = ["maturin>=1.10,<2"]
+requires = ["maturin>=1.14.1,<2"]
 build-backend = "maturin"
 
 [project]
 name = "cfop-solver"
-version = "0.4.0"
+version = "0.5.0"
 description = "Fast, traceable Rubik's Cube solving and data generation"
-requires-python = ">=3.8"
-license = { text = "MIT" }
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "THIRD_PARTY_DEPENDENCIES.txt"]
 readme = "README.md"
 classifiers = [
   "Programming Language :: Rust",
   "Programming Language :: Python :: Implementation :: CPython",
-  "Programming Language :: Python :: Implementation :: PyPy",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: 3.15",
 ]
+
+[project.urls]
+Repository = "https://github.com/lms21a/cfopsolver"
+Issues = "https://github.com/lms21a/cfopsolver/issues"
+Changelog = "https://github.com/lms21a/cfopsolver/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [
-  "maturin>=1.10,<2",
+  "maturin>=1.14.1,<2",
   "mypy>=1.14,<2",
   "pytest>=8.3,<10",
   "ruff>=0.11,<1",
@@ -29,7 +41,7 @@ required-version = ">=0.6.14"
 [tool.maturin]
 features = ["python"]
 module-name = "cfop_solver"
-include = ["cfop_solver.pyi", "THIRD_PARTY_NOTICES.md"]
+include = [{ path = "tests/*.py", format = "sdist" }, { path = "scripts/*.py", format = "sdist" }]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -38,10 +50,10 @@ python_files = ["python_*.py", "test_*.py"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
-files = ["examples/python_api.py", "tests/python_smoke.py"]
+files = ["examples/python_api.py", "tests/python_smoke.py", "scripts"]
 
 [tool.ruff]
-target-version = "py38"
+target-version = "py39"
 line-length = 100
 
 [tool.ruff.lint]

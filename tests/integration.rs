@@ -7,6 +7,33 @@ use cfop_solver::{
 };
 
 #[test]
+fn invalid_search_limits_fail_before_search_even_for_solved_cubes() {
+    for config in [
+        SolveConfig {
+            max_depth: 0,
+            ..SolveConfig::default()
+        },
+        SolveConfig {
+            max_depth: 31,
+            ..SolveConfig::default()
+        },
+        SolveConfig {
+            max_depth: usize::MAX,
+            ..SolveConfig::default()
+        },
+        SolveConfig {
+            probe_limit: 0,
+            ..SolveConfig::default()
+        },
+    ] {
+        assert!(matches!(
+            Solver::new(config).solve(&Cube::solved()),
+            Err(cfop_solver::Error::InvalidConfig(_))
+        ));
+    }
+}
+
+#[test]
 fn every_supported_move_matches_golden_and_round_trips() {
     let goldens = [
         (

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use pyo3::{
     exceptions::{PyRuntimeError, PyValueError},
     prelude::*,
-    types::{PyAny, PyModule},
+    types::{PyAny, PyList, PyModule},
 };
 use serde::de::DeserializeOwned;
 
@@ -15,7 +15,7 @@ use crate::{
 
 fn python_error(error: Error) -> PyErr {
     match error {
-        Error::InvalidState(_) | Error::InvalidAlgorithm(_) => {
+        Error::InvalidState(_) | Error::InvalidAlgorithm(_) | Error::InvalidConfig(_) => {
             PyValueError::new_err(error.to_string())
         }
         _ => PyRuntimeError::new_err(error.to_string()),
@@ -28,25 +28,26 @@ fn feature_selection(value: &str) -> PyResult<FeatureSelection> {
         .map_err(|error: Error| PyValueError::new_err(error.to_string()))
 }
 
-fn json_object(py: Python<'_>, value: &impl serde::Serialize) -> PyResult<PyObject> {
+fn json_object(py: Python<'_>, value: &impl serde::Serialize) -> PyResult<Py<PyAny>> {
     let encoded =
         serde_json::to_string(value).map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-    Ok(PyModule::import(py, "json")?
+    Ok(py
+        .import("json")?
         .call_method1("loads", (encoded,))?
-        .into())
+        .unbind())
 }
 
-fn python_value<T: DeserializeOwned>(value: &PyAny) -> PyResult<T> {
+fn python_value<T: DeserializeOwned>(value: &Bound<'_, PyAny>) -> PyResult<T> {
     let py = value.py();
-    let encoded: String = PyModule::import(py, "json")?
+    let encoded: String = py
+        .import("json")?
         .call_method1("dumps", (value,))?
         .extract()?;
     serde_json::from_str(&encoded)
         .map_err(|error| PyValueError::new_err(format!("invalid verifier input: {error}")))
 }
 
-#[pyclass(name = "Cube")]
-#[derive(Clone)]
+#[pyclass(name = "Cube", module = "cfop_solver")]
 struct PyCube {
     inner: Cube,
 }
@@ -107,22 +108,25 @@ impl PyCube {
     }
 
     #[pyo3(signature = (selection="both"))]
-    fn features(&self, py: Python<'_>, selection: &str) -> PyResult<PyObject> {
+    fn features(&self, py: Python<'_>, selection: &str) -> PyResult<Py<PyAny>> {
         let selection = feature_selection(selection)?;
         json_object(py, &self.inner.features(selection))
     }
 
     #[pyo3(signature = (encoding="cubie_ids"))]
-    fn feature_vector(&self, encoding: &str) -> PyResult<Vec<u8>> {
-        match encoding.to_ascii_lowercase().replace('-', "_").as_str() {
-            "cubie" | "cubie_ids" => Ok(self.inner.cubie_feature_ids().to_vec()),
-            "cubie_one_hot" => Ok(self.inner.cubie_one_hot().to_vec()),
-            "facelet" | "facelet_ids" => Ok(self.inner.facelet_ids().to_vec()),
-            "facelet_one_hot" => Ok(self.inner.facelet_one_hot().to_vec()),
-            _ => Err(PyValueError::new_err(
-                "encoding must be cubie_ids, cubie_one_hot, facelet_ids, or facelet_one_hot",
-            )),
-        }
+    fn feature_vector(&self, py: Python<'_>, encoding: &str) -> PyResult<Py<PyList>> {
+        let values =
+            match encoding.to_ascii_lowercase().replace('-', "_").as_str() {
+                "cubie" | "cubie_ids" => self.inner.cubie_feature_ids().to_vec(),
+                "cubie_one_hot" => self.inner.cubie_one_hot().to_vec(),
+                "facelet" | "facelet_ids" => self.inner.facelet_ids().to_vec(),
+                "facelet_one_hot" => self.inner.facelet_one_hot().to_vec(),
+                _ => return Err(PyValueError::new_err(
+                    "encoding must be cubie_ids, cubie_one_hot, facelet_ids, or facelet_one_hot",
+                )),
+            };
+        // PyO3 converts Vec<u8> into bytes. Preserve the public list[int] API.
+        Ok(PyList::new(py, values)?.unbind())
     }
 
     fn __str__(&self) -> String {
@@ -134,12 +138,12 @@ impl PyCube {
     }
 }
 
-#[pyclass(name = "Solver")]
+#[pyclass(name = "Solver", module = "cfop_solver")]
 struct PySolver {
     inner: Solver,
 }
 
-#[pyclass(name = "TrainingVerifier")]
+#[pyclass(name = "TrainingVerifier", module = "cfop_solver")]
 struct PyTrainingVerifier {
     inner: TrainingVerifier,
 }
@@ -156,15 +160,15 @@ impl PyTrainingVerifier {
         })
     }
 
-    fn verify(&self, py: Python<'_>, item: &PyAny) -> PyResult<PyObject> {
+    fn verify(&self, py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let input: serde_json::Value = python_value(item)?;
-        let result = py.allow_threads(|| self.inner.verify_json(&input));
+        let result = py.detach(|| self.inner.verify_json(&input));
         json_object(py, &result)
     }
 
-    fn verify_batch(&self, py: Python<'_>, items: &PyAny) -> PyResult<PyObject> {
+    fn verify_batch(&self, py: Python<'_>, items: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let inputs: Vec<serde_json::Value> = python_value(items)?;
-        let result = py.allow_threads(|| self.inner.verify_json_batch(&inputs));
+        let result = py.detach(|| self.inner.verify_json_batch(&inputs));
         json_object(py, &result)
     }
 }
@@ -192,42 +196,44 @@ impl PySolver {
         let cross_mode: CrossMode = cross.parse().map_err(python_error)?;
         let f2l_strategy: F2lStrategy = f2l.parse().map_err(python_error)?;
         let efficiency: Efficiency = efficiency.parse().map_err(python_error)?;
+        let config = SolveConfig {
+            method,
+            cross_mode,
+            f2l_strategy,
+            efficiency,
+            trace,
+            exploration,
+            max_exploration_states,
+            decisions,
+            max_decision_records,
+            alternatives,
+            max_depth,
+            probe_limit,
+        };
+        config.validate().map_err(python_error)?;
         Ok(Self {
-            inner: Solver::new(SolveConfig {
-                method,
-                cross_mode,
-                f2l_strategy,
-                efficiency,
-                trace,
-                exploration,
-                max_exploration_states,
-                decisions,
-                max_decision_records,
-                alternatives,
-                max_depth,
-                probe_limit,
-            }),
+            inner: Solver::new(config),
         })
     }
 
-    fn solve(&self, py: Python<'_>, cube: &PyCube) -> PyResult<PyObject> {
+    fn solve(&self, py: Python<'_>, cube: &PyCube) -> PyResult<Py<PyAny>> {
         let result = py
-            .allow_threads(|| self.inner.solve(&cube.inner))
+            .detach(|| self.inner.solve(&cube.inner))
             .map_err(python_error)?;
         json_object(py, &result)
     }
 
-    fn solve_state(&self, py: Python<'_>, state: &str) -> PyResult<PyObject> {
+    fn solve_state(&self, py: Python<'_>, state: &str) -> PyResult<Py<PyAny>> {
         let cube = Cube::from_facelets(state).map_err(python_error)?;
         let result = py
-            .allow_threads(|| self.inner.solve(&cube))
+            .detach(|| self.inner.solve(&cube))
             .map_err(python_error)?;
         json_object(py, &result)
     }
 
-    fn solve_scramble(&self, py: Python<'_>, scramble: &str) -> PyResult<PyObject> {
+    fn solve_scramble(&self, py: Python<'_>, scramble: &str) -> PyResult<Py<PyAny>> {
         let result = py
-            .allow_threads(|| self.inner.solve_scramble(scramble))
+            .detach(|| self.inner.solve_scramble(scramble))
             .map_err(python_error)?;
         json_object(py, &result)
     }
@@ -250,7 +256,7 @@ fn verify_solution(state: &str, solution: &str) -> PyResult<bool> {
 
 #[pyfunction]
 #[pyo3(signature = (state, selection="both"))]
-fn cube_features(py: Python<'_>, state: &str, selection: &str) -> PyResult<PyObject> {
+fn cube_features(py: Python<'_>, state: &str, selection: &str) -> PyResult<Py<PyAny>> {
     let cube = Cube::from_facelets(state).map_err(python_error)?;
     let selection = feature_selection(selection)?;
     json_object(py, &cube.features(selection))
@@ -262,15 +268,15 @@ fn cube_features(py: Python<'_>, state: &str, selection: &str) -> PyResult<PyObj
 #[pyo3(signature = (items, threads=0, features="none"))]
 fn verify_batch(
     py: Python<'_>,
-    items: &PyAny,
+    items: &Bound<'_, PyAny>,
     threads: usize,
     features: &str,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let inputs: Vec<serde_json::Value> = python_value(items)?;
     let features = feature_selection(features)?;
     let verifier =
         TrainingVerifier::new(VerificationConfig { threads, features }).map_err(python_error)?;
-    let result = py.allow_threads(|| verifier.verify_json_batch(&inputs));
+    let result = py.detach(|| verifier.verify_json_batch(&inputs));
     json_object(py, &result)
 }
 
@@ -296,7 +302,7 @@ fn generate(
     decisions: bool,
     max_decision_records: usize,
     features: &str,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let config = py_generate_config(
         count,
         seed,
@@ -317,7 +323,7 @@ fn generate(
         features,
     )?;
     let records = py
-        .allow_threads(|| generate_dataset(&config))
+        .detach(|| generate_dataset(&config))
         .map_err(python_error)?;
     json_object(py, &records)
 }
@@ -366,7 +372,7 @@ fn generate_jsonl(
         max_decision_records,
         features,
     )?;
-    py.allow_threads(|| generate_to_jsonl(&config, path, batch_size))
+    py.detach(|| generate_to_jsonl(&config, path, batch_size))
         .map_err(python_error)
 }
 
@@ -428,7 +434,7 @@ fn py_generate_config(
 }
 
 #[pymodule]
-fn cfop_solver(_py: Python<'_>, module: &PyModule) -> PyResult<()> {
+fn cfop_solver(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyCube>()?;
     module.add_class::<PySolver>()?;
     module.add_class::<PyTrainingVerifier>()?;
@@ -450,7 +456,7 @@ fn cfop_solver(_py: Python<'_>, module: &PyModule) -> PyResult<()> {
     module.add("FACELET_ONE_HOT_WIDTH", crate::FACELET_ONE_HOT_WIDTH)?;
     module.add(
         "CUBIE_FEATURE_CARDINALITIES",
-        crate::CUBIE_FEATURE_CARDINALITIES.to_vec(),
+        PyList::new(py, crate::CUBIE_FEATURE_CARDINALITIES)?,
     )?;
     module.add("VERIFICATION_SCHEMA", crate::VERIFICATION_SCHEMA)?;
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;

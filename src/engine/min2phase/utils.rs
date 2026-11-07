@@ -6,7 +6,7 @@ use super::{
 };
 use crate::engine::constants::ALL_MOVES;
 use crate::engine::moves::Move::{self, *};
-use static_init::dynamic;
+use std::sync::LazyLock;
 
 /// Solution
 #[derive(Debug)]
@@ -186,8 +186,7 @@ impl UtilTables {
     }
 }
 
-#[dynamic(lazy)]
-pub static UT: UtilTables = UtilTables::new();
+pub static UT: LazyLock<UtilTables> = LazyLock::new(UtilTables::new);
 
 #[cfg(test)]
 mod tests {
